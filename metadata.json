@@ -1,0 +1,6 @@
+{
+  "name": "قارئ الفصول",
+  "description": "تطبيق قراءة ومراجعة الفصول والروايات للمترجمين والقراء بدون إنترنت مع حفظ دقيق لموضع القراءة وأدوات تحرير شاملة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

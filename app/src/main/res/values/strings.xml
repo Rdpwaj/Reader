@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">قارئ الفصول</string>
+    <string name="nav_library">المكتبة</string>
+    <string name="nav_continue">متابعة</string>
+    <string name="nav_stats">الإحصائيات</string>
+    <string name="nav_settings">الإعدادات</string>
+    <string name="search_hint">بحث بالاسم أو داخل محتوى الفصول...</string>
+    <string name="paste_from_clipboard">لصق من الحافظة</string>
+    <string name="import_files">استيراد ملفات</string>
+    <string name="new_chapter">ملف / فصل جديد</string>
+    <string name="new_novel">رواية / مجلد جديد</string>
+    <string name="continue_reading">متابعة القراءة</string>
+    <string name="empty_library_title">مكتبتك جاهزة للترجمة والقراءة</string>
+    <string name="empty_library_subtitle">ألصق أول فصل لك من الحافظة أو استورد ملفاتك للبدء فورًا بدون إنترنت</string>
+    <string name="trash_bin">سلة المحذوفات (30 يومًا)</string>
+    <string name="glossary_title">قاموس المصطلحات والأسماء</string>
+    <string name="find_and_replace">بحث واستبدال</string>
+    <string name="bookmarks_and_notes">العلامات والتظليلات والملاحظات</string>
+</resources>
