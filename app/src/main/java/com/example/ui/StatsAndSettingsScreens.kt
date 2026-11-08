@@ -1,5 +1,8 @@
 package com.example.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,7 +29,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -480,6 +485,7 @@ fun FullSettingsScreen(
     val coroutineScope = rememberCoroutineScope()
     var showResetConfirm by remember { mutableStateOf(false) }
     var showPinDialog by remember { mutableStateOf(false) }
+    var showGitHubGuideDialog by remember { mutableStateOf(false) }
 
     // Create Document Launcher for Exporting Full JSON Backup
     val createBackupLauncher = rememberLauncherForActivityResult(
@@ -851,6 +857,17 @@ fun FullSettingsScreen(
                     )
                 }
 
+                Button(
+                    onClick = { showGitHubGuideDialog = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("github_apk_guide_button")
+                ) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("دليل استخراج وتحميل APK من GitHub (Releases & Actions)")
+                }
+
                 TextButton(
                     onClick = { showResetConfirm = true },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
@@ -862,6 +879,16 @@ fun FullSettingsScreen(
                 }
             }
         }
+    }
+
+    if (showGitHubGuideDialog) {
+        GitHubApkGuideDialog(
+            context = context,
+            onCopySuccess = {
+                viewModel.showToastMessage("تم نسخ كود GitHub Actions إلى الحافظة!")
+            },
+            onDismiss = { showGitHubGuideDialog = false }
+        )
     }
 
     if (showResetConfirm) {
@@ -920,6 +947,152 @@ fun FullSettingsScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun GitHubApkGuideDialog(
+    context: Context,
+    onCopySuccess: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val workflowYaml = remember {
+        """
+        name: Build & Release Android APK
+        on:
+          push:
+            branches: [ "main", "master" ]
+          workflow_dispatch:
+        permissions:
+          contents: write
+        jobs:
+          build-apk:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+              - uses: actions/setup-java@v4
+                with:
+                  distribution: 'temurin'
+                  java-version: '21'
+              - uses: android-actions/setup-android@v3
+              - name: Generate debug.keystore
+                run: |
+                  if [ ! -f debug.keystore ]; then
+                    keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+                  fi
+              - uses: gradle/actions/setup-gradle@v4
+                with:
+                  gradle-version: '9.3.1'
+              - name: Build Debug APK
+                run: |
+                  gradle assembleDebug --no-daemon
+                  cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.0-debug.apk
+              - uses: actions/upload-artifact@v4
+                with:
+                  name: ChapterReader-APK
+                  path: app/build/outputs/apk/debug/ChapterReader-v1.0-debug.apk
+              - uses: softprops/action-gh-release@v2
+                with:
+                  tag_name: latest-apk
+                  name: "قارئ الفصول - أحدث نسخة APK جاهزة للتثبيت"
+                  files: app/build/outputs/apk/debug/ChapterReader-v1.0-debug.apk
+        """.trimIndent()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "دليل بناء وتحميل APK من GitHub خطوة بخطوة",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                GuideStepItem(
+                    stepNumber = "1",
+                    title = "رفع ملف البناء التلقائي (Push to GitHub)",
+                    description = "اضغط على أيقونة GitHub أعلى منصة AI Studio واعمل Push لرفع ملف (.github/workflows/build-apk.yml) المجهز في المشروع إلى مستودعك."
+                )
+                GuideStepItem(
+                    stepNumber = "2",
+                    title = "تشغيل البناء من تبويب Actions",
+                    description = "افتح مستودعك في GitHub ⬅️ ادخل تبويب Actions ⬅️ اختر (Build & Release Android APK) ⬅️ اضغط زر Run workflow وانتظر دقيقتين حتى تظهر علامة الصح الخضراء ✅."
+                )
+                GuideStepItem(
+                    stepNumber = "3",
+                    title = "التحميل المباشر من قسم Releases (الأسهل للجوال)",
+                    description = "من الصفحة الرئيسية لمستودعك على GitHub، افتح قسم Releases وستجد إصدار (قارئ الفصول - أحدث نسخة APK) وبداخله ملف ChapterReader-v1.0-debug.apk جاهزًا للتحميل والتثبيت بضغطة واحدة بدون فك ضغط!"
+                )
+                GuideStepItem(
+                    stepNumber = "4",
+                    title = "أو التحميل من قسم Artifacts داخل Actions",
+                    description = "يمكنك أيضًا الدخول على عملية البناء المكتملة داخل تبويب Actions والنزول لأسفل الصفحة عند قسم Artifacts والضغط على ChapterReader-APK لتنزيله."
+                )
+
+                OutlinedButton(
+                    onClick = {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        cm?.setPrimaryClip(ClipData.newPlainText("build-apk.yml", workflowYaml))
+                        onCopySuccess()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("نسخ كود build-apk.yml إلى الحافظة")
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("فهمت الخطوات")
+            }
+        }
+    )
+}
+
+@Composable
+private fun GuideStepItem(
+    stepNumber: String,
+    title: String,
+    description: String
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            verticalAlignment = Alignment.Top,
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = stepNumber,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(description, style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
