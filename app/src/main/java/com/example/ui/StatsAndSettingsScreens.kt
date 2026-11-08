@@ -974,7 +974,9 @@ private fun GitHubApkGuideDialog(
                 with:
                   distribution: 'temurin'
                   java-version: '21'
-              - uses: android-actions/setup-android@v3
+              - name: Accept Android SDK Licenses
+                run: |
+                  yes | ${'$'}{ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
               - name: Generate debug.keystore
                 run: |
                   if [ ! -f debug.keystore ]; then
