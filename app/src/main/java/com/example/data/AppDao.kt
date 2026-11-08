@@ -9,6 +9,13 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface AppDao {
+    // --- Fast Startup Existence Checks (0 RAM overhead) ---
+    @Query("SELECT COUNT(id) FROM novels")
+    suspend fun countNovels(): Int
+
+    @Query("SELECT COUNT(id) FROM chapters")
+    suspend fun countChapters(): Int
+
     // --- Novels ---
     @Query("SELECT * FROM novels WHERE deletedAt IS NULL ORDER BY createdAt DESC")
     fun observeActiveNovels(): Flow<List<NovelEntity>>
@@ -31,18 +38,48 @@ interface AppDao {
     @Query("DELETE FROM novels WHERE id = :id")
     suspend fun permanentlyDeleteNovel(id: Long)
 
-    // --- Chapters ---
-    @Query("SELECT * FROM chapters WHERE deletedAt IS NULL ORDER BY createdAt ASC")
+    // --- Chapters (Lightweight Metadata Queries for Instant Startup & Low RAM) ---
+    @Query(
+        """
+        SELECT id, novelId, title, '' AS content, format, wordCount, readingStatus, translatorStage, 
+               favorite, tags, paragraphIndex, charOffset, progressPercent, createdAt, modifiedAt, lastReadAt, deletedAt 
+        FROM chapters 
+        WHERE deletedAt IS NULL 
+        ORDER BY createdAt ASC
+        """
+    )
     fun observeActiveChapters(): Flow<List<ChapterEntity>>
 
-    @Query("SELECT * FROM chapters WHERE deletedAt IS NOT NULL ORDER BY deletedAt DESC")
+    @Query(
+        """
+        SELECT id, novelId, title, '' AS content, format, wordCount, readingStatus, translatorStage, 
+               favorite, tags, paragraphIndex, charOffset, progressPercent, createdAt, modifiedAt, lastReadAt, deletedAt 
+        FROM chapters 
+        WHERE deletedAt IS NOT NULL 
+        ORDER BY deletedAt DESC
+        """
+    )
     fun observeDeletedChapters(): Flow<List<ChapterEntity>>
 
-    @Query("SELECT * FROM chapters")
-    suspend fun getAllChaptersSnapshot(): List<ChapterEntity>
+    // Observe full chapter (including content) ONLY for the single open chapter in Reader / Editor
+    @Query("SELECT * FROM chapters WHERE id = :id LIMIT 1")
+    fun observeChapterById(id: Long): Flow<ChapterEntity?>
 
     @Query("SELECT * FROM chapters WHERE id = :id LIMIT 1")
     suspend fun getChapterById(id: Long): ChapterEntity?
+
+    // Fast SQLite full-text search returning matching chapter IDs without loading all bodies into RAM
+    @Query(
+        """
+        SELECT id FROM chapters 
+        WHERE deletedAt IS NULL 
+          AND (title LIKE '%' || :query || '%' OR content LIKE '%' || :query || '%' OR tags LIKE '%' || :query || '%')
+        """
+    )
+    suspend fun searchActiveChapterIds(query: String): List<Long>
+
+    @Query("SELECT * FROM chapters")
+    suspend fun getAllChaptersSnapshot(): List<ChapterEntity>
 
     @Query("SELECT * FROM chapters WHERE novelId = :novelId AND deletedAt IS NULL")
     suspend fun getChaptersForNovel(novelId: Long): List<ChapterEntity>
@@ -55,6 +92,37 @@ interface AppDao {
 
     @Update
     suspend fun updateChapter(chapter: ChapterEntity)
+
+    @Query("UPDATE chapters SET title = :title, tags = :tags, modifiedAt = :modifiedAt WHERE id = :chapterId")
+    suspend fun updateChapterTitleAndTags(
+        chapterId: Long,
+        title: String,
+        tags: String,
+        modifiedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE chapters SET favorite = :favorite WHERE id = :chapterId")
+    suspend fun updateChapterFavorite(chapterId: Long, favorite: Boolean)
+
+    @Query("UPDATE chapters SET translatorStage = :stage, modifiedAt = :modifiedAt WHERE id = :chapterId")
+    suspend fun updateChapterTranslatorStage(
+        chapterId: Long,
+        stage: String,
+        modifiedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE chapters SET novelId = :novelId, modifiedAt = :modifiedAt WHERE id = :chapterId")
+    suspend fun updateChapterNovelId(
+        chapterId: Long,
+        novelId: Long?,
+        modifiedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE chapters SET deletedAt = :deletedAt WHERE id = :chapterId")
+    suspend fun updateChapterDeletedAt(chapterId: Long, deletedAt: Long?)
+
+    @Query("UPDATE chapters SET deletedAt = :deletedAt WHERE novelId = :novelId")
+    suspend fun updateNovelChaptersDeletedAt(novelId: Long, deletedAt: Long?)
 
     @Query(
         """

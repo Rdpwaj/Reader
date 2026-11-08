@@ -122,7 +122,7 @@ class MainActivity : ComponentActivity() {
         val settings = viewModel.globalSettings.value
         if (activeChapterId != null && settings.volumeKeyPaging) {
             if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                val ch = viewModel.chapters.value.find { it.id == activeChapterId }
+                val ch = viewModel.activeReadingChapter.value
                 if (ch != null) {
                     val paras = TextProcessingUtils.splitIntoParagraphs(ch.content, settings.hideTashkeel)
                     val delta = if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) 4 else -4
@@ -149,11 +149,14 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
 
     val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
     val activeChapterId by viewModel.activeChapterId.collectAsStateWithLifecycle()
+    val activeReadingChapter by viewModel.activeReadingChapter.collectAsStateWithLifecycle()
     val activeSubScreen by viewModel.activeSubScreen.collectAsStateWithLifecycle()
     val editingChapterId by viewModel.editingChapterId.collectAsStateWithLifecycle()
+    val activeEditingChapter by viewModel.activeEditingChapter.collectAsStateWithLifecycle()
 
     val selectedNovelId by viewModel.selectedNovelId.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val searchMatchedChapterIds by viewModel.searchMatchedChapterIds.collectAsStateWithLifecycle()
     val statusFilter by viewModel.statusFilter.collectAsStateWithLifecycle()
     val tagFilter by viewModel.tagFilter.collectAsStateWithLifecycle()
     val selectedChapterIds by viewModel.selectedChapterIds.collectAsStateWithLifecycle()
@@ -222,27 +225,31 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
     }
 
     // 2. Full-Screen Reader Mode
-    val readingChapter = chapters.find { it.id == activeChapterId }
-    if (readingChapter != null) {
-        val novel = novels.find { it.id == readingChapter.novelId }
-        val sameNovelChapters = remember(chapters, readingChapter.novelId) {
-            chapters.filter { it.novelId == readingChapter.novelId }
-                .sortedWith { a, b -> TextProcessingUtils.naturalCompare(a.title, b.title) }
-        }
-        ReaderScreen(
-            viewModel = viewModel,
-            chapter = readingChapter,
-            novel = novel,
-            novelChapters = sameNovelChapters,
-            annotations = annotations,
-            glossaryTerms = glossary,
-            globalSettings = settings,
-            onBack = { viewModel.closeReader() },
-            onOpenAllSettings = {
-                viewModel.closeReader()
-                viewModel.selectTab(BottomNavTab.SETTINGS)
+    if (activeChapterId != null) {
+        val readingChapter = activeReadingChapter
+        if (readingChapter != null && readingChapter.id == activeChapterId) {
+            val novel = novels.find { it.id == readingChapter.novelId }
+            val sameNovelChapters = remember(chapters, readingChapter.novelId) {
+                chapters.filter { it.novelId == readingChapter.novelId }
+                    .sortedWith { a, b -> TextProcessingUtils.naturalCompare(a.title, b.title) }
             }
-        )
+            ReaderScreen(
+                viewModel = viewModel,
+                chapter = readingChapter,
+                novel = novel,
+                novelChapters = sameNovelChapters,
+                annotations = annotations,
+                glossaryTerms = glossary,
+                globalSettings = settings,
+                onBack = { viewModel.closeReader() },
+                onOpenAllSettings = {
+                    viewModel.closeReader()
+                    viewModel.selectTab(BottomNavTab.SETTINGS)
+                }
+            )
+        } else {
+            Surface(modifier = Modifier.fillMaxSize()) {}
+        }
         return
     }
 
@@ -291,7 +298,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
         ) {
             when (activeSubScreen) {
                 SubScreen.EDITOR -> {
-                    val chToEdit = chapters.find { it.id == editingChapterId } ?: chapters.firstOrNull()
+                    val chToEdit = activeEditingChapter
                     if (chToEdit != null) {
                         InAppEditorScreen(
                             viewModel = viewModel,
@@ -299,8 +306,15 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                             glossaryTerms = glossary,
                             onBack = { viewModel.closeSubScreen() }
                         )
-                    } else {
-                        viewModel.closeSubScreen()
+                    } else if (editingChapterId == null) {
+                        val fallbackId = chapters.firstOrNull()?.id
+                        if (fallbackId != null) {
+                            LaunchedEffect(fallbackId) {
+                                viewModel.openSubScreen(SubScreen.EDITOR, fallbackId)
+                            }
+                        } else {
+                            viewModel.closeSubScreen()
+                        }
                     }
                 }
 
@@ -352,6 +366,7 @@ fun ChapterReaderRoot(viewModel: MainViewModel) {
                                 settings = settings,
                                 selectedNovelId = selectedNovelId,
                                 searchQuery = searchQuery,
+                                searchMatchedChapterIds = searchMatchedChapterIds,
                                 statusFilter = statusFilter,
                                 tagFilter = tagFilter,
                                 selectedChapterIds = selectedChapterIds,

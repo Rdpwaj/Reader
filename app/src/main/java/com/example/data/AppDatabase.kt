@@ -30,7 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "chapter_reader_offline.db"
                 )
-                    .fallbackToDestructiveMigration()
+                    // Keep user data safe across all APK updates (no destructive migration)
                     .build()
                 INSTANCE = instance
                 instance

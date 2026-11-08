@@ -59,6 +59,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -76,7 +77,9 @@ import com.example.data.NovelEntity
 import com.example.data.TextProcessingUtils
 import com.example.ui.theme.HighlightColors
 import com.example.viewmodel.MainViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 
 /**
@@ -290,21 +293,31 @@ fun FindAndReplaceScreen(
         }
     }
 
-    // Live Match Preview before applying
-    val matchPreviews = remember(targetChapters, findText, matchCase) {
-        if (findText.isBlank()) emptyList()
-        else {
-            val regex = if (matchCase) Regex(Regex.escape(findText))
-            else Regex(Regex.escape(findText), RegexOption.IGNORE_CASE)
+    // Live Match Preview before applying (fetched on-demand on Dispatchers.IO so RAM stays minimal)
+    val matchPreviews by produceState(
+        initialValue = emptyList<Triple<ChapterEntity, Int, String>>(),
+        targetChapters,
+        findText,
+        matchCase
+    ) {
+        if (findText.isBlank()) {
+            value = emptyList()
+        } else {
+            delay(180L)
+            value = withContext(Dispatchers.IO) {
+                val regex = if (matchCase) Regex(Regex.escape(findText))
+                else Regex(Regex.escape(findText), RegexOption.IGNORE_CASE)
 
-            targetChapters.mapNotNull { ch ->
-                val matches = regex.findAll(ch.content).toList()
-                if (matches.isEmpty()) null
-                else {
-                    val firstRange = matches.first().range
-                    val s = (firstRange.first - 25).coerceAtLeast(0)
-                    val e = (firstRange.last + 35).coerceAtMost(ch.content.length)
-                    Triple(ch, matches.size, ch.content.substring(s, e).replace("\n", " "))
+                targetChapters.mapNotNull { chMeta ->
+                    val fullCh = viewModel.repository.getFullChapterById(chMeta.id) ?: return@mapNotNull null
+                    val matches = regex.findAll(fullCh.content).toList()
+                    if (matches.isEmpty()) null
+                    else {
+                        val firstRange = matches.first().range
+                        val s = (firstRange.first - 25).coerceAtLeast(0)
+                        val e = (firstRange.last + 35).coerceAtMost(fullCh.content.length)
+                        Triple(fullCh, matches.size, fullCh.content.substring(s, e).replace("\n", " "))
+                    }
                 }
             }
         }

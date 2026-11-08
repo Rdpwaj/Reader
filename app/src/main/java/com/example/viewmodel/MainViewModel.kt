@@ -14,10 +14,17 @@ import com.example.data.ReaderSettings
 import com.example.data.ReadingStatsEntity
 import com.example.data.SplitChapterPreview
 import com.example.data.TextProcessingUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -40,34 +47,36 @@ data class UndoTrashBanner(
     val deletedNovel: NovelEntity? = null
 )
 
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = AppDatabase.getInstance(application)
     val repository = ReaderRepository(application, database.appDao())
 
     val globalSettings: StateFlow<ReaderSettings> = repository.globalSettingsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReaderSettings())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ReaderSettings())
 
     val novels: StateFlow<List<NovelEntity>> = repository.activeNovelsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val deletedNovels: StateFlow<List<NovelEntity>> = repository.deletedNovelsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    // Lightweight chapter list (0 bytes of body content in RAM!)
     val chapters: StateFlow<List<ChapterEntity>> = repository.activeChaptersFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val deletedChapters: StateFlow<List<ChapterEntity>> = repository.deletedChaptersFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val annotations: StateFlow<List<AnnotationEntity>> = repository.allAnnotationsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val glossary: StateFlow<List<GlossaryEntity>> = repository.allGlossaryFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val readingStats: StateFlow<List<ReadingStatsEntity>> = repository.readingStatsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     // Navigation & UI State
     private val _currentTab = MutableStateFlow(BottomNavTab.LIBRARY)
@@ -76,20 +85,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activeChapterId = MutableStateFlow<Long?>(null)
     val activeChapterId: StateFlow<Long?> = _activeChapterId.asStateFlow()
 
+    // Full chapter content loaded ONLY for the single currently active chapter in Reader
+    val activeReadingChapter: StateFlow<ChapterEntity?> = _activeChapterId
+        .flatMapLatest { id ->
+            if (id == null) flowOf(null) else repository.observeFullChapterById(id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     private val _activeSubScreen = MutableStateFlow(SubScreen.NONE)
     val activeSubScreen: StateFlow<SubScreen> = _activeSubScreen.asStateFlow()
 
     private val _editingChapterId = MutableStateFlow<Long?>(null)
     val editingChapterId: StateFlow<Long?> = _editingChapterId.asStateFlow()
 
+    // Full chapter content loaded ONLY for the single chapter being edited in Editor
+    val activeEditingChapter: StateFlow<ChapterEntity?> = _editingChapterId
+        .flatMapLatest { id ->
+            if (id == null) flowOf(null) else repository.observeFullChapterById(id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     // Library Filter & Selection State
-    private val _selectedNovelId = MutableStateFlow<Long?>(null) // null = All novels & standalone, -1L = Standalone only
+    private val _selectedNovelId = MutableStateFlow<Long?>(null)
     val selectedNovelId: StateFlow<Long?> = _selectedNovelId.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private val _statusFilter = MutableStateFlow("ALL") // ALL, NEW, READING, COMPLETED, FAVORITE, DRAFT, REVIEWED, FINAL
+    // Fast SQLite full-text search matching IDs (debounced so typing is instant)
+    val searchMatchedChapterIds: StateFlow<Set<Long>> = _searchQuery
+        .debounce(180L)
+        .mapLatest { q ->
+            if (q.isBlank()) emptySet() else repository.searchActiveChapterIds(q)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    private val _statusFilter = MutableStateFlow("ALL")
     val statusFilter: StateFlow<String> = _statusFilter.asStateFlow()
 
     private val _tagFilter = MutableStateFlow<String?>(null)
@@ -108,7 +139,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sharedIncomingText: StateFlow<String?> = _sharedIncomingText.asStateFlow()
 
     init {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.initializeAndSeed()
         }
     }
@@ -192,21 +223,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Settings Updates ---
     fun updateSettings(transform: (ReaderSettings) -> ReaderSettings) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val updated = transform(globalSettings.value)
             repository.saveGlobalSettings(updated)
         }
     }
 
     fun saveNovelSettingsOverride(novelId: Long, overrideSettings: ReaderSettings?) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.saveNovelSettingsOverride(novelId, overrideSettings)
             showToastMessage(if (overrideSettings != null) "تم تخصيص الإعدادات لهذه الرواية" else "تمت العودة للإعدادات العامة")
         }
     }
 
     fun resetSettingsToDefault() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val currentLang = globalSettings.value.language
             repository.saveGlobalSettings(ReaderSettings(language = currentLang, onboardingCompleted = true))
             showToastMessage("تمت إعادة جميع الإعدادات إلى الوضع الافتراضي")
@@ -215,7 +246,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Novel & Chapter Creation ---
     fun createNovel(title: String, description: String, colorHex: String, category: String, tags: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val id = repository.createNovel(title, description, colorHex, category, tags)
             _selectedNovelId.value = id
             showToastMessage("تم إنشاء الرواية: $title")
@@ -223,13 +254,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateNovelSort(novel: NovelEntity, sortBy: String, ascending: Boolean) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.updateNovel(novel.copy(sortBy = sortBy, sortAscending = ascending))
         }
     }
 
     fun updateNovelDetails(novel: NovelEntity) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.updateNovel(novel)
             showToastMessage("تم تحديث بيانات الرواية")
         }
@@ -244,7 +275,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         tags: String = "",
         openImmediately: Boolean = false
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val cleanContent = if (globalSettings.value.autoFixPastedWhitespace) {
                 TextProcessingUtils.cleanPastedText(content)
             } else {
@@ -266,14 +297,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addSplitChaptersBatch(novelId: Long?, previews: List<SplitChapterPreview>, format: String = "TXT") {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.createChaptersBatch(novelId, previews, format)
             showToastMessage("تم تقسيم النص وإضافة ${previews.size} فصول بنجاح")
         }
     }
 
     fun importFilesFromUris(uris: List<Uri>, fileNames: List<String>, targetNovelId: Long?) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>()
             var importedCount = 0
             uris.forEachIndexed { idx, uri ->
@@ -297,7 +328,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun generate500kWordStressTestChapter(novelId: Long?) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             showToastMessage("جاري توليد فصل بحجم 500,000 كلمة لاختبار الأداء الفائق...")
             val hugeText = TextProcessingUtils.generate500kWordStressTestContent()
             val id = repository.createChapter(
@@ -314,20 +345,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- File Management Actions ---
     fun updateChapter(chapter: ChapterEntity) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.updateChapter(chapter)
         }
     }
 
     fun duplicateChapter(chapter: ChapterEntity) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.duplicateChapter(chapter)
             showToastMessage("تم تكرار الفصل: ${chapter.title}")
         }
     }
 
     fun convertChaptersFormat(chaptersToConvert: List<ChapterEntity>, targetFormat: String, saveAsNewCopy: Boolean) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             chaptersToConvert.forEach { ch ->
                 repository.convertChapterFormat(ch, targetFormat, saveAsNewCopy)
             }
@@ -340,7 +371,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun batchRenameSelectedChapters(chaptersList: List<ChapterEntity>, pattern: String, startNumber: Int, zeroPadding: Int) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.batchRenameChapters(chaptersList, pattern, startNumber, zeroPadding)
             clearMultiSelection()
             showToastMessage("تمت إعادة تسمية ${chaptersList.size} فصول")
@@ -348,7 +379,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun moveChaptersToNovel(chaptersToMove: List<ChapterEntity>, targetNovelId: Long?) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             chaptersToMove.forEach { ch ->
                 repository.updateChapter(ch.copy(novelId = targetNovelId))
             }
@@ -358,7 +389,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun mergeSelectedChapters(chaptersToMerge: List<ChapterEntity>, mergedTitle: String, targetNovelId: Long?, moveOriginalsToTrash: Boolean) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.mergeChapters(chaptersToMerge, mergedTitle, targetNovelId, moveOriginalsToTrash)
             clearMultiSelection()
             showToastMessage("تم دمج ${chaptersToMerge.size} فصول في ملف واحد")
@@ -366,11 +397,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun splitChapterIntoMultiple(chapter: ChapterEntity) {
-        viewModelScope.launch {
-            val splitParts = TextProcessingUtils.autoSplitIntoChapters(chapter.content, true)
+        viewModelScope.launch(Dispatchers.IO) {
+            val full = repository.getFullChapterById(chapter.id) ?: chapter
+            val splitParts = TextProcessingUtils.autoSplitIntoChapters(full.content, true)
             if (splitParts.size <= 1) {
-                // Split by equal paragraph chunks if no explicit "الفصل X" headers exist
-                val paras = TextProcessingUtils.splitIntoParagraphs(chapter.content)
+                val paras = TextProcessingUtils.splitIntoParagraphs(full.content)
                 if (paras.size < 2) {
                     showToastMessage("الفصل قصير جدًا ولا يمكن تقسيمه")
                     return@launch
@@ -378,18 +409,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val mid = paras.size / 2
                 val part1 = paras.subList(0, mid).joinToString("\n\n")
                 val part2 = paras.subList(mid, paras.size).joinToString("\n\n")
-                repository.createChapter(chapter.novelId, "${chapter.title} - جزء 1", part1, chapter.format)
-                repository.createChapter(chapter.novelId, "${chapter.title} - جزء 2", part2, chapter.format)
+                repository.createChapter(full.novelId, "${full.title} - جزء 1", part1, full.format)
+                repository.createChapter(full.novelId, "${full.title} - جزء 2", part2, full.format)
                 showToastMessage("تم تقسيم الفصل إلى جزأين")
             } else {
-                repository.createChaptersBatch(chapter.novelId, splitParts, chapter.format)
+                repository.createChaptersBatch(full.novelId, splitParts, full.format)
                 showToastMessage("تم تقسيم الفصل إلى ${splitParts.size} فصول")
             }
         }
     }
 
     fun deleteChaptersToTrash(chapterIds: List<Long>) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.moveChaptersToTrash(chapterIds)
             clearMultiSelection()
             _undoBanner.value = UndoTrashBanner(
@@ -400,7 +431,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteNovelToTrash(novel: NovelEntity) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.moveNovelToTrash(novel.id)
             if (_selectedNovelId.value == novel.id) {
                 _selectedNovelId.value = null
@@ -414,7 +445,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun undoLastTrashAction() {
         val banner = _undoBanner.value ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             if (banner.deletedChapterIds.isNotEmpty()) {
                 repository.restoreChaptersFromTrash(banner.deletedChapterIds)
             }
@@ -431,35 +462,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun restoreChapterFromTrash(id: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.restoreChaptersFromTrash(listOf(id))
             showToastMessage("تمت استعادة الفصل من السلة")
         }
     }
 
     fun restoreNovelFromTrash(novel: NovelEntity) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.restoreNovelFromTrash(novel)
             showToastMessage("تمت استعادة الرواية وفصولها")
         }
     }
 
     fun permanentlyDeleteChapter(id: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.permanentlyDeleteChapter(id)
             showToastMessage("تم الحذف النهائي للفصل")
         }
     }
 
     fun permanentlyDeleteNovel(novelId: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.permanentlyDeleteNovel(novelId)
             showToastMessage("تم الحذف النهائي للرواية")
         }
     }
 
     fun emptyTrash() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.emptyAllTrash()
             showToastMessage("تم إفراغ سلة المحذوفات بالكامل")
         }
@@ -467,19 +498,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Reading Position & Auto-Learning WPM ---
     fun saveReadingPosition(chapterId: Long, paragraphIndex: Int, charOffset: Int, totalParagraphs: Int) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.saveReadingPosition(chapterId, paragraphIndex, charOffset, totalParagraphs)
         }
     }
 
     fun recordSessionMetrics(minutesSpent: Int, wordsReadInSession: Int, chapterCompleted: Boolean) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.recordReadingProgress(
                 minutesDelta = minutesSpent,
                 wordsDelta = wordsReadInSession,
                 completedChapterDelta = if (chapterCompleted) 1 else 0
             )
-            // If auto-learn reading speed is active and user read for at least 1 minute
             val currentSettings = globalSettings.value
             if (currentSettings.autoLearnReadingSpeed && minutesSpent >= 1 && wordsReadInSession >= 80) {
                 val observedWpm = (wordsReadInSession / minutesSpent).coerceIn(90, 450)
@@ -501,7 +531,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         noteText: String,
         colorHex: String
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.addAnnotation(
                 AnnotationEntity(
                     chapterId = chapterId,
@@ -525,13 +555,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteAnnotation(id: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.deleteAnnotation(id)
         }
     }
 
     fun saveGlossaryTerm(novelId: Long?, term: String, translation: String, category: String, note: String, colorHex: String, existingId: Long = 0L) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.saveGlossaryTerm(
                 GlossaryEntity(
                     id = existingId,
@@ -548,7 +578,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteGlossaryTerm(id: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.deleteGlossaryTerm(id)
         }
     }
@@ -559,7 +589,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         replaceWith: String,
         matchCase: Boolean
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val count = repository.replaceInChapters(targetChapters, findQuery, replaceWith, matchCase)
             showToastMessage("تم استبدال $count تطابق في ${targetChapters.size} فصل")
         }

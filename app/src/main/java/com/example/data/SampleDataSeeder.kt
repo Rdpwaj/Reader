@@ -7,9 +7,7 @@ import java.util.Locale
 object SampleDataSeeder {
 
     suspend fun seedIfEmpty(dao: AppDao) {
-        val existingNovels = dao.getAllNovelsSnapshot()
-        val existingChapters = dao.getAllChaptersSnapshot()
-        if (existingNovels.isNotEmpty() || existingChapters.isNotEmpty()) return
+        if (dao.countChapters() > 0 || dao.countNovels() > 0) return
 
         val now = System.currentTimeMillis()
         val novelId = dao.insertNovel(

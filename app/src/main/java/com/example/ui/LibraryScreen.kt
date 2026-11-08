@@ -107,6 +107,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -131,6 +132,7 @@ import com.example.viewmodel.SubScreen
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -141,6 +143,7 @@ fun LibraryScreen(
     settings: ReaderSettings,
     selectedNovelId: Long?,
     searchQuery: String,
+    searchMatchedChapterIds: Set<Long> = emptySet(),
     statusFilter: String,
     tagFilter: String?,
     selectedChapterIds: Set<Long>,
@@ -148,6 +151,7 @@ fun LibraryScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var fabExpanded by remember { mutableStateOf(false) }
 
     // Dialog states
@@ -200,6 +204,7 @@ fun LibraryScreen(
         chapters,
         selectedNovelId,
         searchQuery,
+        searchMatchedChapterIds,
         statusFilter,
         tagFilter,
         activeSortBy,
@@ -215,7 +220,7 @@ fun LibraryScreen(
                 true
             } else {
                 ch.title.contains(searchQuery, ignoreCase = true) ||
-                    ch.content.contains(searchQuery, ignoreCase = true) ||
+                    searchMatchedChapterIds.contains(ch.id) ||
                     ch.tags.contains(searchQuery, ignoreCase = true)
             }
             val matchesStatus = when (statusFilter) {
@@ -933,12 +938,19 @@ fun LibraryScreen(
                     contextMenuChapter = null
                 },
                 onShareExport = {
-                    shareChapterText(context, activeMenuChapter)
+                    val targetId = activeMenuChapter.id
                     contextMenuChapter = null
+                    scope.launch {
+                        val full = viewModel.repository.getFullChapterById(targetId) ?: activeMenuChapter
+                        shareChapterText(context, full)
+                    }
                 },
                 onShowDetails = {
-                    showDetailsDialogFor = activeMenuChapter
+                    val targetId = activeMenuChapter.id
                     contextMenuChapter = null
+                    scope.launch {
+                        showDetailsDialogFor = viewModel.repository.getFullChapterById(targetId) ?: activeMenuChapter
+                    }
                 },
                 onDelete = {
                     viewModel.deleteChaptersToTrash(listOf(activeMenuChapter.id))
@@ -969,17 +981,23 @@ fun LibraryScreen(
                     }
                     OutlinedButton(
                         onClick = {
-                            val novelChapters = chapters.filter { it.novelId == activeMenuNovel.id }
-                            val combined = novelChapters.joinToString("\n\n====================\n\n") {
-                                "${it.title}\n\n${it.content}"
-                            }
-                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TITLE, activeMenuNovel.title)
-                                putExtra(Intent.EXTRA_TEXT, combined)
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, "تصدير الرواية كاملة"))
+                            val novelToExport = activeMenuNovel
+                            val novelChapterIds = chapters.filter { it.novelId == novelToExport.id }.map { it.id }
                             contextMenuNovel = null
+                            scope.launch {
+                                val fullChapters = novelChapterIds.mapNotNull { id ->
+                                    viewModel.repository.getFullChapterById(id)
+                                }
+                                val combined = fullChapters.joinToString("\n\n====================\n\n") {
+                                    "${it.title}\n\n${it.content}"
+                                }
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TITLE, novelToExport.title)
+                                    putExtra(Intent.EXTRA_TEXT, combined)
+                                }
+                                context.startActivity(Intent.createChooser(sendIntent, "تصدير الرواية كاملة"))
+                            }
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {

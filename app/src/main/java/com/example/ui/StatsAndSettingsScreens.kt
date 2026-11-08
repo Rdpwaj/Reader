@@ -30,12 +30,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.Lock
@@ -48,6 +51,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -550,23 +555,52 @@ fun FullSettingsScreen(
             }
         }
 
-        // Section 1: Font Settings (الخط)
+        // Section 1: Font Settings (قائمة الخط)
         item {
-            SettingsSectionCard(title = "1) الخط (Font & Typography)") {
-                Text("عائلة الخط:", style = MaterialTheme.typography.labelLarge)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(vertical = 4.dp)
-                ) {
-                    AvailableReaderFonts.forEach { (key, label) ->
-                        FilterChip(
-                            selected = settings.fontFamily == key,
-                            onClick = { viewModel.updateSettings { it.copy(fontFamily = key) } },
-                            label = { Text(label) }
-                        )
+            var fontMenuOpen by remember { mutableStateOf(false) }
+            val currentFontLabel = remember(settings.fontFamily) {
+                AvailableReaderFonts.find { it.first == settings.fontFamily }?.second ?: settings.fontFamily
+            }
+            SettingsSectionCard(
+                title = "1) قائمة الخط ($currentFontLabel • ${settings.fontSizeSp.toInt()}sp)",
+                initiallyExpanded = true
+            ) {
+                Text("اختر عائلة الخط من القائمة:", style = MaterialTheme.typography.labelLarge)
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { fontMenuOpen = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(currentFontLabel, fontWeight = FontWeight.Bold)
+                            Icon(Icons.Default.ExpandMore, contentDescription = "فتح قائمة الخطوط")
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = fontMenuOpen,
+                        onDismissRequest = { fontMenuOpen = false },
+                        modifier = Modifier.fillMaxWidth(0.85f)
+                    ) {
+                        AvailableReaderFonts.forEach { (key, label) ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = label,
+                                        fontWeight = if (settings.fontFamily == key) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (settings.fontFamily == key) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = {
+                                    viewModel.updateSettings { it.copy(fontFamily = key) }
+                                    fontMenuOpen = false
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -1101,25 +1135,47 @@ private fun GuideStepItem(
 @Composable
 private fun SettingsSectionCard(
     title: String,
+    initiallyExpanded: Boolean = false,
     content: @Composable () -> Unit
 ) {
+    var expanded by remember { mutableStateOf(initiallyExpanded) }
     Card(
         shape = RoundedCornerShape(18.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
-            )
-            content()
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "طي القائمة" else "فتح القائمة",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                ) {
+                    HorizontalDivider()
+                    content()
+                }
+            }
         }
     }
 }

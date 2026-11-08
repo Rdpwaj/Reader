@@ -20,7 +20,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
@@ -30,12 +29,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -60,6 +65,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.FormatAlignJustify
@@ -101,11 +108,12 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -122,7 +130,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -147,18 +154,23 @@ import com.example.ui.theme.ReaderPaperText
 import com.example.ui.theme.ReaderSepiaBg
 import com.example.ui.theme.ReaderSepiaText
 import com.example.ui.theme.resolveReaderFontFamily
-import com.example.viewmodel.BottomNavTab
 import com.example.viewmodel.MainViewModel
 import com.example.viewmodel.SubScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.absoluteValue
 import kotlin.math.max
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, FlowPreview::class)
 @Composable
 fun ReaderScreen(
     viewModel: MainViewModel,
@@ -178,7 +190,6 @@ fun ReaderScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
 
-    // Effective Settings: Per-Novel Override if configured, otherwise Global Settings
     val effectiveSettings = remember(novel?.settingsOverrideJson, globalSettings) {
         if (!novel?.settingsOverrideJson.isNullOrBlank()) {
             ReaderSettings.fromJsonString(novel?.settingsOverrideJson)
@@ -187,16 +198,43 @@ fun ReaderScreen(
         }
     }
 
-    // Split text into virtualized paragraphs (handles 500,000+ words smoothly)
-    val paragraphs = remember(chapter.content, effectiveSettings.hideTashkeel) {
-        TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
+    // Parse paragraphs off the main thread for instant opening without frame drops
+    val paragraphs by produceState(
+        initialValue = remember(chapter.id) {
+            if (chapter.content.length < 30_000) {
+                TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
+            } else {
+                listOf("جاري تجهيز النص...")
+            }
+        },
+        key1 = chapter.id,
+        key2 = chapter.content,
+        key3 = effectiveSettings.hideTashkeel
+    ) {
+        if (chapter.content.length >= 30_000) {
+            value = withContext(Dispatchers.Default) {
+                TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
+            }
+        } else {
+            value = TextProcessingUtils.splitIntoParagraphs(chapter.content, effectiveSettings.hideTashkeel)
+        }
     }
 
     val initialParagraphIdx = remember(chapter.id) {
-        chapter.paragraphIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+        chapter.paragraphIndex.coerceAtLeast(0)
     }
 
-    val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialParagraphIdx)
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = initialParagraphIdx.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+    )
+
+    // Ensure position jumps accurately if async paragraph splitting finishes for huge 500k-word files
+    LaunchedEffect(paragraphs.size) {
+        if (paragraphs.size > 1 && initialParagraphIdx > 0 && listState.firstVisibleItemIndex == 0) {
+            listState.scrollToItem(initialParagraphIdx.coerceIn(0, paragraphs.size - 1))
+        }
+    }
+
     val paragraphsPerPage = 6
     val totalPages = max(1, (paragraphs.size + paragraphsPerPage - 1) / paragraphsPerPage)
     val pagerState = rememberPagerState(
@@ -225,10 +263,10 @@ fun ReaderScreen(
     var ttsSpeakingParagraphIndex by remember { mutableIntStateOf(-1) }
     var ttsSpeed by remember { mutableFloatStateOf(1.0f) }
     var ttsPitch by remember { mutableFloatStateOf(1.0f) }
-    var ttsSleepTimerMinutes by remember { mutableIntStateOf(0) } // 0 = off
+    var ttsSleepTimerMinutes by remember { mutableIntStateOf(0) }
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
 
-    // Current paragraph index derived from either Scroll mode or Paged mode
+    // Current paragraph index (derived by item index only — does NOT recompose on every sub-pixel scroll!)
     val currentParagraphIndex by remember {
         derivedStateOf {
             if (effectiveSettings.readingMode == "PAGES") {
@@ -239,14 +277,6 @@ fun ReaderScreen(
         }
     }
 
-    // Current character offset inside the visible paragraph
-    val currentCharOffset by remember {
-        derivedStateOf {
-            val paraText = paragraphs.getOrNull(currentParagraphIndex) ?: ""
-            if (paraText.isEmpty()) 0 else (listState.firstVisibleItemScrollOffset / 4).coerceIn(0, paraText.length)
-        }
-    }
-
     val currentProgressPercent by remember(paragraphs.size) {
         derivedStateOf {
             if (paragraphs.size <= 1) 100f
@@ -254,7 +284,6 @@ fun ReaderScreen(
         }
     }
 
-    // Session metrics tracking
     val sessionStartMillis = remember(chapter.id) { System.currentTimeMillis() }
     val sessionStartParagraph = remember(chapter.id) { initialParagraphIdx }
 
@@ -280,44 +309,47 @@ fun ReaderScreen(
         }
     }
 
-    // Initialize Android TextToSpeech Engine
-    DisposableEffect(context) {
+    // Initialize Android TextToSpeech Engine Lazily ONLY when user opens TTS controls
+    DisposableEffect(showTtsControls) {
         var engine: TextToSpeech? = null
-        engine = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                engine?.language = Locale("ar")
-                engine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) {
-                        val idx = utteranceId?.removePrefix("para_")?.toIntOrNull() ?: return
-                        val nextIdx = idx + 1
-                        if (nextIdx < paragraphs.size && isTtsPlaying) {
-                            ttsSpeakingParagraphIndex = nextIdx
-                            coroutineScope.launch {
-                                listState.animateScrollToItem(nextIdx)
+        if (showTtsControls) {
+            engine = TextToSpeech(context) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    engine?.language = Locale("ar")
+                    engine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) {
+                            val idx = utteranceId?.removePrefix("para_")?.toIntOrNull() ?: return
+                            val nextIdx = idx + 1
+                            if (nextIdx < paragraphs.size && isTtsPlaying) {
+                                ttsSpeakingParagraphIndex = nextIdx
+                                coroutineScope.launch {
+                                    listState.animateScrollToItem(nextIdx)
+                                }
+                                engine?.speak(
+                                    paragraphs[nextIdx],
+                                    TextToSpeech.QUEUE_FLUSH,
+                                    null,
+                                    "para_$nextIdx"
+                                )
+                            } else {
+                                isTtsPlaying = false
+                                ttsSpeakingParagraphIndex = -1
                             }
-                            engine?.speak(
-                                paragraphs[nextIdx],
-                                TextToSpeech.QUEUE_FLUSH,
-                                null,
-                                "para_$nextIdx"
-                            )
-                        } else {
-                            isTtsPlaying = false
-                            ttsSpeakingParagraphIndex = -1
                         }
-                    }
 
-                    override fun onError(utteranceId: String?) {
-                        isTtsPlaying = false
-                    }
-                })
+                        override fun onError(utteranceId: String?) {
+                            isTtsPlaying = false
+                        }
+                    })
+                }
             }
+            ttsEngine = engine
         }
-        ttsEngine = engine
         onDispose {
             engine?.stop()
             engine?.shutdown()
+            ttsEngine = null
         }
     }
 
@@ -333,33 +365,41 @@ fun ReaderScreen(
         }
     }
 
-    // Auto-Dismiss "تابعت من حيث توقفت" Banner after 5 seconds
+    // Auto-Dismiss "تابعت من حيث توقفت" Banner after 4.5 seconds
     LaunchedEffect(showResumeBanner) {
         if (showResumeBanner) {
-            delay(5500L)
+            delay(4500L)
             showResumeBanner = false
         }
     }
 
-    // Periodic Auto-Save of Exact Reading Position every 3 seconds
-    LaunchedEffect(chapter.id, currentParagraphIndex, currentCharOffset) {
-        delay(2500L)
-        viewModel.saveReadingPosition(
-            chapterId = chapter.id,
-            paragraphIndex = currentParagraphIndex,
-            charOffset = currentCharOffset,
-            totalParagraphs = paragraphs.size
-        )
+    // Debounced Background Position Saving (Zero scroll lag!)
+    LaunchedEffect(chapter.id, paragraphs.size) {
+        snapshotFlow { currentParagraphIndex }
+            .distinctUntilChanged()
+            .debounce(1500L)
+            .collectLatest { paraIdx ->
+                if (paragraphs.size > 1) {
+                    val approxCharOffset = (listState.firstVisibleItemScrollOffset / 4).coerceAtLeast(0)
+                    viewModel.saveReadingPosition(
+                        chapterId = chapter.id,
+                        paragraphIndex = paraIdx,
+                        charOffset = approxCharOffset,
+                        totalParagraphs = paragraphs.size
+                    )
+                }
+            }
     }
 
     // Save position immediately on Pause / Stop / Exit / App Background
     DisposableEffect(lifecycleOwner, chapter.id) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                val approxCharOffset = (listState.firstVisibleItemScrollOffset / 4).coerceAtLeast(0)
                 viewModel.saveReadingPosition(
                     chapterId = chapter.id,
                     paragraphIndex = currentParagraphIndex,
-                    charOffset = currentCharOffset,
+                    charOffset = approxCharOffset,
                     totalParagraphs = paragraphs.size
                 )
             }
@@ -367,10 +407,11 @@ fun ReaderScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            val approxCharOffset = (listState.firstVisibleItemScrollOffset / 4).coerceAtLeast(0)
             viewModel.saveReadingPosition(
                 chapterId = chapter.id,
                 paragraphIndex = currentParagraphIndex,
-                charOffset = currentCharOffset,
+                charOffset = approxCharOffset,
                 totalParagraphs = paragraphs.size
             )
             val elapsedMinutes = ((System.currentTimeMillis() - sessionStartMillis) / 60_000L).toInt().coerceAtLeast(1)
@@ -388,7 +429,7 @@ fun ReaderScreen(
         if (effectiveSettings.autoScrollSpeed > 0f && effectiveSettings.readingMode == "SCROLL" && !barsVisible) {
             while (true) {
                 listState.scrollBy(effectiveSettings.autoScrollSpeed * 1.4f)
-                delay(32L)
+                delay(16L)
             }
         }
     }
@@ -411,15 +452,17 @@ fun ReaderScreen(
         }
     }
 
-    val chapterAnnotations = remember(annotations, chapter.id) {
-        annotations.filter { it.chapterId == chapter.id }
+    // Group annotations by paragraphIndex in a HashMap for O(1) lookup during scrolling
+    val annotationsByParagraph = remember(annotations, chapter.id) {
+        annotations.filter { it.chapterId == chapter.id }.groupBy { it.paragraphIndex }
     }
-    val isCurrentParagraphBookmarked = remember(chapterAnnotations, currentParagraphIndex) {
-        chapterAnnotations.any { it.type == "BOOKMARK" && it.paragraphIndex == currentParagraphIndex }
+    val isCurrentParagraphBookmarked = remember(annotationsByParagraph, currentParagraphIndex) {
+        annotationsByParagraph[currentParagraphIndex]?.any { it.type == "BOOKMARK" } == true
     }
 
-    val activeGlossary = remember(glossaryTerms, chapter.novelId) {
-        glossaryTerms.filter { it.novelId == null || it.novelId == chapter.novelId }
+    val activeGlossary = remember(glossaryTerms, chapter.novelId, effectiveSettings.highlightGlossaryInText) {
+        if (!effectiveSettings.highlightGlossaryInText) emptyList()
+        else glossaryTerms.filter { it.novelId == null || it.novelId == chapter.novelId }
     }
 
     // Previous & Next Chapter navigation in the same Novel
@@ -431,7 +474,6 @@ fun ReaderScreen(
         novelChapters[currentChapterOrderIdx + 1]
     } else null
 
-    // In-chapter search matching paragraphs
     val searchMatchingParagraphIndices = remember(paragraphs, inTextSearchQuery) {
         if (inTextSearchQuery.isBlank()) emptyList()
         else paragraphs.mapIndexedNotNull { index, text ->
@@ -450,6 +492,28 @@ fun ReaderScreen(
         else -> TextAlign.Right
     }
 
+    val paragraphTextStyle = remember(
+        readerTextColor,
+        readerFontFamily,
+        effectiveSettings.fontSizeSp,
+        effectiveSettings.isBoldWeight,
+        effectiveSettings.lineHeightMultiplier,
+        effectiveSettings.letterSpacingSp,
+        readerTextAlign,
+        effectiveSettings.firstLineIndentDp
+    ) {
+        TextStyle(
+            color = readerTextColor,
+            fontFamily = readerFontFamily,
+            fontSize = effectiveSettings.fontSizeSp.sp,
+            fontWeight = if (effectiveSettings.isBoldWeight) FontWeight.Bold else FontWeight.Normal,
+            lineHeight = (effectiveSettings.fontSizeSp * effectiveSettings.lineHeightMultiplier).sp,
+            letterSpacing = effectiveSettings.letterSpacingSp.sp,
+            textAlign = readerTextAlign,
+            textIndent = TextIndent(firstLine = effectiveSettings.firstLineIndentDp.sp)
+        )
+    }
+
     val (remainingMinutes, _) = remember(chapter.wordCount, currentProgressPercent, effectiveSettings.readingSpeedWpm) {
         TextProcessingUtils.calculateReadingMinutes(
             wordCount = chapter.wordCount,
@@ -458,43 +522,58 @@ fun ReaderScreen(
         )
     }
 
+    val statusBarTopPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBarBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(readerBgColor)
             .pointerInput(effectiveSettings.touchZonesMode, effectiveSettings.readingMode) {
-                detectTapGestures { offset ->
-                    val width = size.width
-                    val third = width / 3f
-                    when {
-                        effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x < third -> {
-                            coroutineScope.launch {
-                                if (effectiveSettings.readingMode == "PAGES") {
-                                    val next = (pagerState.currentPage + 1).coerceAtMost(totalPages - 1)
-                                    pagerState.animateScrollToPage(next)
+                detectTapGestures(
+                    onTap = { offset ->
+                        val width = size.width
+                        val third = width / 3f
+                        when {
+                            effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x < third -> {
+                                coroutineScope.launch {
+                                    if (effectiveSettings.readingMode == "PAGES") {
+                                        val next = (pagerState.currentPage + 1).coerceAtMost(totalPages - 1)
+                                        pagerState.animateScrollToPage(next)
+                                    } else {
+                                        listState.animateScrollToItem((currentParagraphIndex + 5).coerceAtMost(paragraphs.size - 1))
+                                    }
+                                }
+                            }
+                            effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x > third * 2 -> {
+                                coroutineScope.launch {
+                                    if (effectiveSettings.readingMode == "PAGES") {
+                                        val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
+                                        pagerState.animateScrollToPage(prev)
+                                    } else {
+                                        listState.animateScrollToItem((currentParagraphIndex - 5).coerceAtLeast(0))
+                                    }
+                                }
+                            }
+                            else -> {
+                                if (selectedParagraphIndex != null) {
+                                    selectedParagraphIndex = null
                                 } else {
-                                    listState.animateScrollToItem((currentParagraphIndex + 5).coerceAtMost(paragraphs.size - 1))
+                                    if (effectiveSettings.hapticFeedback) {
+                                        localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                    }
+                                    barsVisible = !barsVisible
                                 }
                             }
                         }
-                        effectiveSettings.touchZonesMode == "SIDES_FLIP" && offset.x > third * 2 -> {
-                            coroutineScope.launch {
-                                if (effectiveSettings.readingMode == "PAGES") {
-                                    val prev = (pagerState.currentPage - 1).coerceAtLeast(0)
-                                    pagerState.animateScrollToPage(prev)
-                                } else {
-                                    listState.animateScrollToItem((currentParagraphIndex - 5).coerceAtLeast(0))
-                                }
-                            }
+                    },
+                    onLongPress = {
+                        if (effectiveSettings.hapticFeedback) {
+                            localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                         }
-                        else -> {
-                            if (effectiveSettings.hapticFeedback) {
-                                localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            }
-                            barsVisible = !barsVisible
-                        }
+                        selectedParagraphIndex = if (selectedParagraphIndex == currentParagraphIndex) null else currentParagraphIndex
                     }
-                }
+                )
             }
     ) {
         // Main Reading Area: Either Continuous Virtualized Scroll OR Page-Flip HorizontalPager
@@ -504,8 +583,10 @@ fun ReaderScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(
-                        horizontal = effectiveSettings.marginHorizontalDp.dp,
-                        vertical = (effectiveSettings.marginVerticalDp + 20f).dp
+                        start = effectiveSettings.marginHorizontalDp.dp,
+                        end = effectiveSettings.marginHorizontalDp.dp,
+                        top = statusBarTopPadding + effectiveSettings.marginVerticalDp.dp + 12.dp,
+                        bottom = navBarBottomPadding + effectiveSettings.marginVerticalDp.dp + 32.dp
                     )
             ) { pageIndex ->
                 val pageOffset = ((pagerState.currentPage - pageIndex) + pagerState.currentPageOffsetFraction).absoluteValue
@@ -518,10 +599,9 @@ fun ReaderScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            // Subtle Page-Turn 3D perspective effect
                             alpha = 1f - (pageOffset * 0.35f).coerceIn(0f, 0.5f)
-                            scaleX = 1f - (pageOffset * 0.06f).coerceIn(0f, 0.1f)
-                            scaleY = 1f - (pageOffset * 0.06f).coerceIn(0f, 0.1f)
+                            scaleX = 1f - (pageOffset * 0.05f).coerceIn(0f, 0.08f)
+                            scaleY = 1f - (pageOffset * 0.05f).coerceIn(0f, 0.08f)
                         }
                         .verticalScroll(rememberScrollState())
                 ) {
@@ -530,35 +610,25 @@ fun ReaderScreen(
                         ReaderParagraphItem(
                             paragraphIndex = globalIdx,
                             paragraphText = paraText,
-                            readerTextColor = readerTextColor,
-                            fontFamily = readerFontFamily,
-                            settings = effectiveSettings,
-                            textAlign = readerTextAlign,
-                            annotations = chapterAnnotations.filter { it.paragraphIndex == globalIdx },
-                            glossaryTerms = if (effectiveSettings.highlightGlossaryInText) activeGlossary else emptyList(),
+                            textStyle = paragraphTextStyle,
+                            annotations = annotationsByParagraph[globalIdx] ?: emptyList(),
+                            glossaryTerms = activeGlossary,
                             searchQuery = inTextSearchQuery,
                             isTtsSpeaking = ttsSpeakingParagraphIndex == globalIdx,
-                            isSelected = selectedParagraphIndex == globalIdx,
-                            onTap = { barsVisible = !barsVisible },
-                            onLongPress = {
-                                if (effectiveSettings.hapticFeedback) {
-                                    localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                                }
-                                selectedParagraphIndex = if (selectedParagraphIndex == globalIdx) null else globalIdx
-                            }
+                            isSelected = selectedParagraphIndex == globalIdx
                         )
                     }
                 }
             }
         } else {
-            // Virtualized LazyColumn for Continuous Scroll (handles 500k+ words smoothly)
+            // High-Performance Virtualized LazyColumn (Zero gesture conflicts, 120fps scrolling)
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
                     start = effectiveSettings.marginHorizontalDp.dp,
                     end = effectiveSettings.marginHorizontalDp.dp,
-                    top = (effectiveSettings.marginVerticalDp + 36f).dp,
-                    bottom = (effectiveSettings.marginVerticalDp + 110f).dp
+                    top = statusBarTopPadding + effectiveSettings.marginVerticalDp.dp + 16.dp,
+                    bottom = navBarBottomPadding + effectiveSettings.marginVerticalDp.dp + 90.dp
                 ),
                 verticalArrangement = Arrangement.spacedBy(
                     if (effectiveSettings.emptyLineBetweenParagraphs) effectiveSettings.paragraphSpacingDp.dp
@@ -568,42 +638,25 @@ fun ReaderScreen(
                     .fillMaxSize()
                     .testTag("reader_lazy_column")
             ) {
-                itemsIndexed(paragraphs, key = { idx, _ -> idx }) { idx, paraText ->
+                itemsIndexed(
+                    items = paragraphs,
+                    key = { idx, _ -> idx },
+                    contentType = { _, _ -> "paragraph" }
+                ) { idx, paraText ->
                     ReaderParagraphItem(
                         paragraphIndex = idx,
                         paragraphText = paraText,
-                        readerTextColor = readerTextColor,
-                        fontFamily = readerFontFamily,
-                        settings = effectiveSettings,
-                        textAlign = readerTextAlign,
-                        annotations = chapterAnnotations.filter { it.paragraphIndex == idx },
-                        glossaryTerms = if (effectiveSettings.highlightGlossaryInText) activeGlossary else emptyList(),
+                        textStyle = paragraphTextStyle,
+                        annotations = annotationsByParagraph[idx] ?: emptyList(),
+                        glossaryTerms = activeGlossary,
                         searchQuery = inTextSearchQuery,
                         isTtsSpeaking = ttsSpeakingParagraphIndex == idx,
-                        isSelected = selectedParagraphIndex == idx,
-                        onTap = {
-                            // Check if user tapped a glossary term in this paragraph
-                            val matchedGlossary = activeGlossary.firstOrNull { paraText.contains(it.term) }
-                            if (selectedParagraphIndex != null) {
-                                selectedParagraphIndex = null
-                            } else {
-                                barsVisible = !barsVisible
-                            }
-                            if (matchedGlossary != null && barsVisible) {
-                                selectedGlossaryPopup = matchedGlossary
-                            }
-                        },
-                        onLongPress = {
-                            if (effectiveSettings.hapticFeedback) {
-                                localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                            }
-                            selectedParagraphIndex = if (selectedParagraphIndex == idx) null else idx
-                        }
+                        isSelected = selectedParagraphIndex == idx
                     )
                 }
 
-                // End of Chapter Footer Card ("في نهاية الفصل: زر الفصل التالي مع خيار الفتح التلقائي")
-                item(key = "chapter_footer") {
+                // End of Chapter Footer Card
+                item(key = "chapter_footer", contentType = "footer") {
                     EndOfChapterFooterCard(
                         chapter = chapter,
                         nextChapter = nextChapter,
@@ -624,7 +677,7 @@ fun ReaderScreen(
             }
         }
 
-        // Warm Eye-Care Filter Overlay (فلتر دافئ لراحة العين)
+        // Warm Eye-Care Filter Overlay
         if (effectiveSettings.warmEyeFilterIntensity > 0.01f) {
             Box(
                 modifier = Modifier
@@ -638,17 +691,20 @@ fun ReaderScreen(
         }
 
         // Permanent Thin Edge Progress Bar + Clock + Battery + Percentage + Remaining Time
-        if (effectiveSettings.showThinEdgeProgress) {
+        // Respects navigationBarsPadding() so it sits cleanly above the device system navigation bar!
+        if (effectiveSettings.showThinEdgeProgress && !barsVisible) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .background(readerBgColor.copy(alpha = 0.92f))
+                    .navigationBarsPadding()
             ) {
                 if (effectiveSettings.showClockAndBatteryInEdge || effectiveSettings.showPercentAndRemaining) {
-                    val clockStr = remember(currentParagraphIndex) {
+                    val clockStr = remember(currentParagraphIndex / 5) {
                         SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
                     }
-                    val batteryPct = remember(currentParagraphIndex) {
+                    val batteryPct = remember(currentParagraphIndex / 10) {
                         val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
                         bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: 95
                     }
@@ -657,14 +713,13 @@ fun ReaderScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(readerBgColor.copy(alpha = 0.85f))
-                            .padding(horizontal = 16.dp, vertical = 2.dp)
+                            .padding(horizontal = 16.dp, vertical = 3.dp)
                     ) {
                         if (effectiveSettings.showClockAndBatteryInEdge) {
                             Text(
                                 text = "🕒 $clockStr  •  🔋 $batteryPct%",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = readerTextColor.copy(alpha = 0.65f)
+                                color = readerTextColor.copy(alpha = 0.7f)
                             )
                         } else {
                             Spacer(modifier = Modifier.width(1.dp))
@@ -673,7 +728,7 @@ fun ReaderScreen(
                             Text(
                                 text = "${currentProgressPercent.toInt()}%  •  متبقي $remainingMinutes د",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = readerTextColor.copy(alpha = 0.65f)
+                                color = readerTextColor.copy(alpha = 0.7f)
                             )
                         }
                     }
@@ -689,14 +744,15 @@ fun ReaderScreen(
             }
         }
 
-        // Resume Reading Notification Banner ("تابعت من حيث توقفت" وزر "من البداية")
+        // Resume Reading Notification Banner (Respects statusBarsPadding)
         AnimatedVisibility(
             visible = showResumeBanner,
             enter = slideInVertically() + fadeIn(),
             exit = slideOutVertically() + fadeOut(),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 64.dp, start = 16.dp, end = 16.dp)
+                .statusBarsPadding()
+                .padding(top = 60.dp, start = 16.dp, end = 16.dp)
         ) {
             Surface(
                 shape = RoundedCornerShape(24.dp),
@@ -754,7 +810,8 @@ fun ReaderScreen(
                 shadowElevation = 8.dp,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 72.dp, start = 16.dp, end = 16.dp)
+                    .statusBarsPadding()
+                    .padding(top = 68.dp, start = 16.dp, end = 16.dp)
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Row(
@@ -767,7 +824,6 @@ fun ReaderScreen(
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold
                         )
-                        // Highlight color circles
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             HighlightColors.forEach { hex ->
                                 val col = parseColorSafe(hex, Color.Yellow)
@@ -851,7 +907,7 @@ fun ReaderScreen(
             }
         }
 
-        // Top Bar (Appears on center tap)
+        // Top Bar (Appears on center tap - Respects statusBarsPadding so it never overlaps notch/status bar!)
         AnimatedVisibility(
             visible = barsVisible && effectiveSettings.showTopBarInReader,
             enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
@@ -859,11 +915,12 @@ fun ReaderScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             Surface(
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
                 tonalElevation = 4.dp,
+                shadowElevation = 4.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column {
+                Column(modifier = Modifier.statusBarsPadding()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -893,16 +950,14 @@ fun ReaderScreen(
                             }
                         }
 
-                        // In-text Search button
                         IconButton(onClick = { showInTextSearch = !showInTextSearch }) {
                             Icon(Icons.Default.Search, contentDescription = "بحث داخل النص")
                         }
 
-                        // Quick Bookmark button
                         IconButton(
                             onClick = {
-                                val existing = chapterAnnotations.find {
-                                    it.type == "BOOKMARK" && it.paragraphIndex == currentParagraphIndex
+                                val existing = annotationsByParagraph[currentParagraphIndex]?.find {
+                                    it.type == "BOOKMARK"
                                 }
                                 if (existing != null) {
                                     viewModel.deleteAnnotation(existing.id)
@@ -914,7 +969,7 @@ fun ReaderScreen(
                                         novelId = chapter.novelId,
                                         type = "BOOKMARK",
                                         paragraphIndex = currentParagraphIndex,
-                                        startOffset = currentCharOffset,
+                                        startOffset = 0,
                                         endOffset = snippet.length,
                                         selectedText = snippet,
                                         noteText = "علامة مرجعية عند فقرة ${currentParagraphIndex + 1}",
@@ -931,7 +986,6 @@ fun ReaderScreen(
                             )
                         }
 
-                        // ⋮ Overflow Menu
                         Box {
                             IconButton(onClick = { showTopOverflowMenu = true }) {
                                 Icon(Icons.Default.MoreVert, contentDescription = "المزيد")
@@ -940,6 +994,14 @@ fun ReaderScreen(
                                 expanded = showTopOverflowMenu,
                                 onDismissRequest = { showTopOverflowMenu = false }
                             ) {
+                                DropdownMenuItem(
+                                    text = { Text("تحديد الفقرة الحالية للتظليل أو الملاحظة") },
+                                    leadingIcon = { Icon(Icons.Default.EditNote, contentDescription = null) },
+                                    onClick = {
+                                        showTopOverflowMenu = false
+                                        selectedParagraphIndex = currentParagraphIndex
+                                    }
+                                )
                                 DropdownMenuItem(
                                     text = { Text("تحرير النص داخل التطبيق (للمترجم)") },
                                     leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
@@ -980,7 +1042,6 @@ fun ReaderScreen(
                         }
                     }
 
-                    // Expandable In-Chapter Search Bar
                     AnimatedVisibility(visible = showInTextSearch) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1027,7 +1088,7 @@ fun ReaderScreen(
             }
         }
 
-        // Bottom Bar (Appears on center tap)
+        // Bottom Bar (Appears on center tap - Respects navigationBarsPadding so it NEVER overlaps phone buttons!)
         AnimatedVisibility(
             visible = barsVisible && effectiveSettings.showBottomBarInReader,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -1035,11 +1096,17 @@ fun ReaderScreen(
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             Surface(
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                tonalElevation = 6.dp,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+                tonalElevation = 8.dp,
+                shadowElevation = 8.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                ) {
                     // Text-to-Speech (TTS) Audio Player Strip
                     AnimatedVisibility(visible = showTtsControls) {
                         Card(
@@ -1311,12 +1378,13 @@ fun ReaderScreen(
         )
     }
 
-    // Chapters Index BottomSheet ("فهرس الفصول وقفز سريع لأي فصل")
+    // Chapters Index BottomSheet
     if (showChaptersDrawer) {
         ModalBottomSheet(onDismissRequest = { showChaptersDrawer = false }) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .navigationBarsPadding()
                     .padding(16.dp)
             ) {
                 Text(
@@ -1329,7 +1397,7 @@ fun ReaderScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxHeight(0.65f)
                 ) {
-                    itemsIndexed(novelChapters) { idx, item ->
+                    itemsIndexed(novelChapters, key = { _, item -> item.id }) { idx, item ->
                         val isCurrent = item.id == chapter.id
                         Card(
                             onClick = {
@@ -1366,7 +1434,7 @@ fun ReaderScreen(
         }
     }
 
-    // Live Settings BottomSheet ("تظهر كـ Bottom Sheet من الأسفل عند الضغط على ⚙ أثناء القراءة مع معاينة فورية")
+    // Live Settings BottomSheet with Expandable Menus & Safe Navigation Bar Insets
     if (showLiveSettingsSheet) {
         ModalBottomSheet(onDismissRequest = { showLiveSettingsSheet = false }) {
             LiveReaderSettingsSheetContent(
@@ -1397,80 +1465,22 @@ fun ReaderScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ReaderParagraphItem(
     paragraphIndex: Int,
     paragraphText: String,
-    readerTextColor: Color,
-    fontFamily: androidx.compose.ui.text.font.FontFamily,
-    settings: ReaderSettings,
-    textAlign: TextAlign,
+    textStyle: TextStyle,
     annotations: List<AnnotationEntity>,
     glossaryTerms: List<GlossaryEntity>,
     searchQuery: String,
     isTtsSpeaking: Boolean,
-    isSelected: Boolean,
-    onTap: () -> Unit,
-    onLongPress: () -> Unit
+    isSelected: Boolean
 ) {
-    val annotatedText = remember(
-        paragraphText,
-        annotations,
-        glossaryTerms,
-        searchQuery,
-        readerTextColor
-    ) {
-        buildAnnotatedString {
-            append(paragraphText)
-
-            // 1. Glossary terms automatic highlighting
-            glossaryTerms.forEach { g ->
-                if (g.term.isNotBlank()) {
-                    var startIndex = paragraphText.indexOf(g.term)
-                    while (startIndex >= 0) {
-                        val endIndex = startIndex + g.term.length
-                        addStyle(
-                            style = SpanStyle(
-                                background = parseColorSafe(g.highlightColorHex, Color(0xFFFDE047)).copy(alpha = 0.35f),
-                                fontWeight = FontWeight.SemiBold
-                            ),
-                            start = startIndex,
-                            end = endIndex
-                        )
-                        startIndex = paragraphText.indexOf(g.term, endIndex)
-                    }
-                }
-            }
-
-            // 2. User Highlights & Notes
-            annotations.forEach { ann ->
-                val col = parseColorSafe(ann.colorHex, Color(0xFFFDE047)).copy(alpha = 0.45f)
-                addStyle(
-                    style = SpanStyle(background = col),
-                    start = 0,
-                    end = paragraphText.length
-                )
-            }
-
-            // 3. Search Query Matches
-            if (searchQuery.isNotBlank()) {
-                var idx = paragraphText.indexOf(searchQuery, ignoreCase = true)
-                while (idx >= 0) {
-                    val end = idx + searchQuery.length
-                    addStyle(
-                        style = SpanStyle(
-                            background = Color(0xFFF59E0B),
-                            color = Color.Black,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        start = idx,
-                        end = end
-                    )
-                    idx = paragraphText.indexOf(searchQuery, end, ignoreCase = true)
-                }
-            }
-        }
+    // Fast-path check: only build AnnotatedString if this paragraph actually contains highlights, glossary terms, or search query
+    val hasFormatting = remember(paragraphText, annotations, glossaryTerms, searchQuery) {
+        annotations.isNotEmpty() ||
+            (searchQuery.isNotBlank() && paragraphText.contains(searchQuery, ignoreCase = true)) ||
+            glossaryTerms.any { it.term.isNotBlank() && paragraphText.contains(it.term) }
     }
 
     val containerBg = when {
@@ -1482,42 +1492,94 @@ private fun ReaderParagraphItem(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(containerBg)
-            .combinedClickable(
-                onClick = onTap,
-                onLongClick = onLongPress
+            .then(
+                if (containerBg != Color.Transparent) {
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(containerBg)
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                } else {
+                    Modifier
+                }
             )
-            .padding(horizontal = 4.dp, vertical = 2.dp)
     ) {
-        Text(
-            text = annotatedText,
-            style = TextStyle(
-                color = readerTextColor,
-                fontFamily = fontFamily,
-                fontSize = settings.fontSizeSp.sp,
-                fontWeight = if (settings.isBoldWeight) FontWeight.Bold else FontWeight.Normal,
-                lineHeight = (settings.fontSizeSp * settings.lineHeightMultiplier).sp,
-                letterSpacing = settings.letterSpacingSp.sp,
-                textAlign = textAlign,
-                textIndent = TextIndent(firstLine = settings.firstLineIndentDp.sp)
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (!hasFormatting) {
+            Text(
+                text = paragraphText,
+                style = textStyle,
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            val annotatedText = remember(paragraphText, annotations, glossaryTerms, searchQuery) {
+                buildAnnotatedString {
+                    append(paragraphText)
 
-        // Show inline note badge if this paragraph has a user note
-        annotations.filter { it.noteText.isNotBlank() }.forEach { noteAnn ->
-            Surface(
-                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.85f),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.padding(top = 4.dp)
-            ) {
-                Text(
-                    text = "📝 ${noteAnn.noteText}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                )
+                    glossaryTerms.forEach { g ->
+                        if (g.term.isNotBlank()) {
+                            var startIndex = paragraphText.indexOf(g.term)
+                            while (startIndex >= 0) {
+                                val endIndex = startIndex + g.term.length
+                                addStyle(
+                                    style = SpanStyle(
+                                        background = parseColorSafe(g.highlightColorHex, Color(0xFFFDE047)).copy(alpha = 0.35f),
+                                        fontWeight = FontWeight.SemiBold
+                                    ),
+                                    start = startIndex,
+                                    end = endIndex
+                                )
+                                startIndex = paragraphText.indexOf(g.term, endIndex)
+                            }
+                        }
+                    }
+
+                    annotations.forEach { ann ->
+                        val col = parseColorSafe(ann.colorHex, Color(0xFFFDE047)).copy(alpha = 0.45f)
+                        addStyle(
+                            style = SpanStyle(background = col),
+                            start = 0,
+                            end = paragraphText.length
+                        )
+                    }
+
+                    if (searchQuery.isNotBlank()) {
+                        var idx = paragraphText.indexOf(searchQuery, ignoreCase = true)
+                        while (idx >= 0) {
+                            val end = idx + searchQuery.length
+                            addStyle(
+                                style = SpanStyle(
+                                    background = Color(0xFFF59E0B),
+                                    color = Color.Black,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                start = idx,
+                                end = end
+                            )
+                            idx = paragraphText.indexOf(searchQuery, end, ignoreCase = true)
+                        }
+                    }
+                }
+            }
+            Text(
+                text = annotatedText,
+                style = textStyle,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        if (annotations.isNotEmpty()) {
+            annotations.filter { it.noteText.isNotBlank() }.forEach { noteAnn ->
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Text(
+                        text = "📝 ${noteAnn.noteText}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
         }
     }
@@ -1555,7 +1617,6 @@ private fun EndOfChapterFooterCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Translator Status Quick Selector at end of chapter
             Text(
                 text = "حالة مراجعة الفصل (للمترجم):",
                 style = MaterialTheme.typography.labelSmall
@@ -1624,10 +1685,19 @@ private fun LiveReaderSettingsSheetContent(
     onToggleNovelOverride: (Boolean) -> Unit,
     onOpenFullSettings: () -> Unit
 ) {
+    // Organized into clean expandable menus so options don't crowd the screen
+    var expandedSection by remember { mutableStateOf("FONT") } // FONT, THEME, TEXT, BEHAVIOR
+    var showFontDropdown by remember { mutableStateOf(false) }
+
+    val currentFontLabel = remember(settings.fontFamily) {
+        AvailableReaderFonts.find { it.first == settings.fontFamily }?.second ?: settings.fontFamily
+    }
+
     Column(
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
@@ -1637,7 +1707,7 @@ private fun LiveReaderSettingsSheetContent(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = "إعدادات القراءة الفورية",
+                text = "قوائم إعدادات القراءة",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -1646,7 +1716,6 @@ private fun LiveReaderSettingsSheetContent(
             }
         }
 
-        // Per-novel override switch ("مع خيار تخصيص لهذه الرواية")
         if (novel != null) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1654,7 +1723,7 @@ private fun LiveReaderSettingsSheetContent(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "تخصيص الإعدادات لرواية «${novel.title}» فقط",
+                    text = "تخصيص لرواية «${novel.title}» فقط",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Switch(
@@ -1664,87 +1733,183 @@ private fun LiveReaderSettingsSheetContent(
             }
         }
 
-        // 1. Themes (فاتح، داكن، أسود AMOLED، سيبيا، ورقي)
-        Text("الثيم ولون الصفحة:", style = MaterialTheme.typography.labelLarge)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.horizontalScroll(rememberScrollState())
+        // Menu 1: قائمة الخط (Font Menu)
+        ReaderExpandableMenuCard(
+            title = "1) قائمة الخط ($currentFontLabel • ${settings.fontSizeSp.toInt()}sp)",
+            expanded = expandedSection == "FONT",
+            onToggle = { expandedSection = if (expandedSection == "FONT") "" else "FONT" }
         ) {
-            val themes = listOf(
-                "SEPIA" to "سيبيا",
-                "PAPER" to "ورقي",
-                "LIGHT" to "فاتح",
-                "DARK" to "داكن",
-                "AMOLED" to "أسود AMOLED"
-            )
-            themes.forEach { (mode, label) ->
+            Text("اختر نوع الخط من القائمة:", style = MaterialTheme.typography.labelLarge)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { showFontDropdown = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(currentFontLabel, fontWeight = FontWeight.Bold)
+                        Icon(Icons.Default.ExpandMore, contentDescription = null)
+                    }
+                }
+                DropdownMenu(
+                    expanded = showFontDropdown,
+                    onDismissRequest = { showFontDropdown = false },
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    AvailableReaderFonts.forEach { (fontKey, fontLabel) ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = fontLabel,
+                                    fontWeight = if (settings.fontFamily == fontKey) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (settings.fontFamily == fontKey) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            onClick = {
+                                onUpdateSettings(settings.copy(fontFamily = fontKey))
+                                showFontDropdown = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("حجم الخط: ${settings.fontSizeSp.toInt()}", modifier = Modifier.width(88.dp))
+                Slider(
+                    value = settings.fontSizeSp,
+                    onValueChange = { onUpdateSettings(settings.copy(fontSizeSp = it)) },
+                    valueRange = 14f..36f,
+                    modifier = Modifier.weight(1f)
+                )
                 FilterChip(
-                    selected = settings.themeMode == mode,
-                    onClick = { onUpdateSettings(settings.copy(themeMode = mode)) },
-                    label = { Text(label) }
+                    selected = settings.isBoldWeight,
+                    onClick = { onUpdateSettings(settings.copy(isBoldWeight = !settings.isBoldWeight)) },
+                    label = { Text("عريض B") }
                 )
             }
         }
 
-        // 2. Font Family Selector
-        Text("عائلة الخط:", style = MaterialTheme.typography.labelLarge)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.horizontalScroll(rememberScrollState())
+        // Menu 2: قائمة الألوان والثيمات والإضاءة
+        ReaderExpandableMenuCard(
+            title = "2) قائمة الثيم والإضاءة (${settings.themeMode})",
+            expanded = expandedSection == "THEME",
+            onToggle = { expandedSection = if (expandedSection == "THEME") "" else "THEME" }
         ) {
-            AvailableReaderFonts.forEach { (fontKey, fontLabel) ->
-                FilterChip(
-                    selected = settings.fontFamily == fontKey,
-                    onClick = { onUpdateSettings(settings.copy(fontFamily = fontKey)) },
-                    label = { Text(fontLabel) }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
+                val themes = listOf(
+                    "SEPIA" to "سيبيا",
+                    "PAPER" to "ورقي",
+                    "LIGHT" to "فاتح",
+                    "DARK" to "داكن",
+                    "AMOLED" to "أسود AMOLED"
+                )
+                themes.forEach { (mode, label) ->
+                    FilterChip(
+                        selected = settings.themeMode == mode,
+                        onClick = { onUpdateSettings(settings.copy(themeMode = mode)) },
+                        label = { Text(label) }
+                    )
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "فلتر راحة العين:",
+                    modifier = Modifier.width(105.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Slider(
+                    value = settings.warmEyeFilterIntensity,
+                    onValueChange = { onUpdateSettings(settings.copy(warmEyeFilterIntensity = it)) },
+                    valueRange = 0f..0.5f,
+                    modifier = Modifier.weight(1f)
                 )
             }
         }
 
-        // 3. Font Size & Bold Weight
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+        // Menu 3: قائمة النص والأسطر والمحاذاة
+        ReaderExpandableMenuCard(
+            title = "3) قائمة النص والأسطر والمحاذاة",
+            expanded = expandedSection == "TEXT",
+            onToggle = { expandedSection = if (expandedSection == "TEXT") "" else "TEXT" }
         ) {
-            Text("حجم الخط: ${settings.fontSizeSp.toInt()}", modifier = Modifier.width(90.dp))
-            Slider(
-                value = settings.fontSizeSp,
-                onValueChange = { onUpdateSettings(settings.copy(fontSizeSp = it)) },
-                valueRange = 14f..36f,
-                modifier = Modifier.weight(1f)
-            )
-            FilterChip(
-                selected = settings.isBoldWeight,
-                onClick = { onUpdateSettings(settings.copy(isBoldWeight = !settings.isBoldWeight)) },
-                label = { Text("عريض B") }
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "ارتفاع السطر: ${String.format(Locale.US, "%.1f", settings.lineHeightMultiplier)}",
+                    modifier = Modifier.width(105.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Slider(
+                    value = settings.lineHeightMultiplier,
+                    onValueChange = { onUpdateSettings(settings.copy(lineHeightMultiplier = it)) },
+                    valueRange = 1.2f..2.6f,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("المحاذاة:", style = MaterialTheme.typography.bodySmall)
+                Row {
+                    IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "RIGHT")) }) {
+                        Icon(Icons.AutoMirrored.Filled.FormatAlignRight, contentDescription = "يمين")
+                    }
+                    IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "JUSTIFY")) }) {
+                        Icon(Icons.Default.FormatAlignJustify, contentDescription = "ضبط")
+                    }
+                    IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "CENTER")) }) {
+                        Icon(Icons.Default.FormatAlignCenter, contentDescription = "وسط")
+                    }
+                    IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "LEFT")) }) {
+                        Icon(Icons.AutoMirrored.Filled.FormatAlignLeft, contentDescription = "يسار")
+                    }
+                }
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
+                FilterChip(
+                    selected = settings.hideTashkeel,
+                    onClick = { onUpdateSettings(settings.copy(hideTashkeel = !settings.hideTashkeel)) },
+                    label = { Text("إخفاء التشكيل") }
+                )
+                FilterChip(
+                    selected = settings.highlightGlossaryInText,
+                    onClick = { onUpdateSettings(settings.copy(highlightGlossaryInText = !settings.highlightGlossaryInText)) },
+                    label = { Text("تظليل القاموس") }
+                )
+            }
         }
 
-        // 4. Line Height & Paragraph Spacing
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+        // Menu 4: قائمة وضع القراءة والتمرير التلقائي
+        ReaderExpandableMenuCard(
+            title = "4) قائمة وضع القراءة والتمرير",
+            expanded = expandedSection == "BEHAVIOR",
+            onToggle = { expandedSection = if (expandedSection == "BEHAVIOR") "" else "BEHAVIOR" }
         ) {
-            Text(
-                text = "ارتفاع السطر: ${String.format(Locale.US, "%.1f", settings.lineHeightMultiplier)}",
-                modifier = Modifier.width(110.dp),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Slider(
-                value = settings.lineHeightMultiplier,
-                onValueChange = { onUpdateSettings(settings.copy(lineHeightMultiplier = it)) },
-                valueRange = 1.2f..2.6f,
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        // 5. Reading Mode (Scroll vs Pages) & Alignment
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = settings.readingMode == "SCROLL",
                     onClick = { onUpdateSettings(settings.copy(readingMode = "SCROLL")) },
@@ -1755,82 +1920,82 @@ private fun LiveReaderSettingsSheetContent(
                     onClick = { onUpdateSettings(settings.copy(readingMode = "PAGES")) },
                     label = { Text("صفحات") }
                 )
+                FilterChip(
+                    selected = settings.showThinEdgeProgress,
+                    onClick = { onUpdateSettings(settings.copy(showThinEdgeProgress = !settings.showThinEdgeProgress)) },
+                    label = { Text("شريط الحافة السفلي") }
+                )
             }
 
-            Row {
-                IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "RIGHT")) }) {
-                    Icon(Icons.AutoMirrored.Filled.FormatAlignRight, contentDescription = "يمين")
-                }
-                IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "JUSTIFY")) }) {
-                    Icon(Icons.Default.FormatAlignJustify, contentDescription = "ضبط")
-                }
-                IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "CENTER")) }) {
-                    Icon(Icons.Default.FormatAlignCenter, contentDescription = "وسط")
-                }
-                IconButton(onClick = { onUpdateSettings(settings.copy(textAlign = "LEFT")) }) {
-                    Icon(Icons.AutoMirrored.Filled.FormatAlignLeft, contentDescription = "يسار")
-                }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = if (settings.autoScrollSpeed <= 0f) "تمرير تلقائي: متوقف"
+                    else "تمرير تلقائي: ${settings.autoScrollSpeed.toInt()}",
+                    modifier = Modifier.width(120.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Slider(
+                    value = settings.autoScrollSpeed,
+                    onValueChange = { onUpdateSettings(settings.copy(autoScrollSpeed = it)) },
+                    valueRange = 0f..10f,
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
 
-        // 6. Auto-Scroll Speed & Warm Eye Filter
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = if (settings.autoScrollSpeed <= 0f) "تمرير تلقائي: متوقف"
-                else "تمرير تلقائي: ${settings.autoScrollSpeed.toInt()}",
-                modifier = Modifier.width(125.dp),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Slider(
-                value = settings.autoScrollSpeed,
-                onValueChange = { onUpdateSettings(settings.copy(autoScrollSpeed = it)) },
-                valueRange = 0f..10f,
-                modifier = Modifier.weight(1f)
-            )
-        }
+        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = "فلتر راحة العين:",
-                modifier = Modifier.width(110.dp),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Slider(
-                value = settings.warmEyeFilterIntensity,
-                onValueChange = { onUpdateSettings(settings.copy(warmEyeFilterIntensity = it)) },
-                valueRange = 0f..0.5f,
-                modifier = Modifier.weight(1f)
-            )
+@Composable
+private fun ReaderExpandableMenuCard(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (expanded) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle)
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (expanded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = null
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 14.dp, end = 14.dp, bottom = 14.dp)
+                ) {
+                    HorizontalDivider()
+                    content()
+                }
+            }
         }
-
-        // 7. Quick Toggles: Hide Tashkeel, Glossary Highlighting, Thin Progress Bar
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.horizontalScroll(rememberScrollState())
-        ) {
-            FilterChip(
-                selected = settings.hideTashkeel,
-                onClick = { onUpdateSettings(settings.copy(hideTashkeel = !settings.hideTashkeel)) },
-                label = { Text("إخفاء التشكيل") }
-            )
-            FilterChip(
-                selected = settings.highlightGlossaryInText,
-                onClick = { onUpdateSettings(settings.copy(highlightGlossaryInText = !settings.highlightGlossaryInText)) },
-                label = { Text("تظليل مصطلحات القاموس") }
-            )
-            FilterChip(
-                selected = settings.showThinEdgeProgress,
-                onClick = { onUpdateSettings(settings.copy(showThinEdgeProgress = !settings.showThinEdgeProgress)) },
-                label = { Text("شريط الحافة السفلي") }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
     }
 }

@@ -4,8 +4,10 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -32,59 +34,67 @@ class ReaderRepository(
     val allGlossaryFlow: Flow<List<GlossaryEntity>> = dao.observeAllGlossary()
     val readingStatsFlow: Flow<List<ReadingStatsEntity>> = dao.observeReadingStats()
 
-    suspend fun initializeAndSeed() {
-        // Purge trash older than 30 days
+    fun observeFullChapterById(chapterId: Long): Flow<ChapterEntity?> =
+        dao.observeChapterById(chapterId)
+
+    suspend fun getFullChapterById(chapterId: Long): ChapterEntity? = withContext(Dispatchers.IO) {
+        dao.getChapterById(chapterId)
+    }
+
+    suspend fun searchActiveChapterIds(query: String): Set<Long> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) emptySet()
+        else dao.searchActiveChapterIds(query.trim()).toSet()
+    }
+
+    suspend fun initializeAndSeed() = withContext(Dispatchers.IO) {
         val cutoff = System.currentTimeMillis() - 30L * 24L * 3600L * 1000L
         dao.purgeExpiredTrashChapters(cutoff)
         dao.purgeExpiredTrashNovels(cutoff)
         SampleDataSeeder.seedIfEmpty(dao)
     }
 
-    suspend fun saveGlobalSettings(settings: ReaderSettings) {
+    suspend fun saveGlobalSettings(settings: ReaderSettings) = withContext(Dispatchers.IO) {
         context.dataStore.edit { prefs ->
             prefs[settingsKey] = settings.toJsonString()
         }
     }
 
-    suspend fun saveNovelSettingsOverride(novelId: Long, settings: ReaderSettings?) {
-        val novel = dao.getNovelById(novelId) ?: return
+    suspend fun saveNovelSettingsOverride(novelId: Long, settings: ReaderSettings?) = withContext(Dispatchers.IO) {
+        val novel = dao.getNovelById(novelId) ?: return@withContext
         dao.updateNovel(novel.copy(settingsOverrideJson = settings?.toJsonString()))
     }
 
     // --- Novel Operations ---
-    suspend fun createNovel(title: String, description: String, colorHex: String, category: String, tags: String): Long {
-        return dao.insertNovel(
-            NovelEntity(
-                title = title.trim().ifBlank { "رواية جديدة" },
-                description = description.trim(),
-                colorHex = colorHex,
-                category = category.ifBlank { "عام" },
-                tags = tags.trim()
+    suspend fun createNovel(title: String, description: String, colorHex: String, category: String, tags: String): Long =
+        withContext(Dispatchers.IO) {
+            dao.insertNovel(
+                NovelEntity(
+                    title = title.trim().ifBlank { "رواية جديدة" },
+                    description = description.trim(),
+                    colorHex = colorHex,
+                    category = category.ifBlank { "عام" },
+                    tags = tags.trim()
+                )
             )
-        )
+        }
+
+    suspend fun updateNovel(novel: NovelEntity) = withContext(Dispatchers.IO) {
+        dao.updateNovel(novel)
     }
 
-    suspend fun updateNovel(novel: NovelEntity) = dao.updateNovel(novel)
-
-    suspend fun moveNovelToTrash(novelId: Long) {
+    suspend fun moveNovelToTrash(novelId: Long) = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
-        val novel = dao.getNovelById(novelId) ?: return
+        val novel = dao.getNovelById(novelId) ?: return@withContext
         dao.updateNovel(novel.copy(deletedAt = now))
-        val chapters = dao.getChaptersForNovel(novelId)
-        chapters.forEach { ch ->
-            dao.updateChapter(ch.copy(deletedAt = now))
-        }
+        dao.updateNovelChaptersDeletedAt(novelId, now)
     }
 
-    suspend fun restoreNovelFromTrash(novel: NovelEntity) {
+    suspend fun restoreNovelFromTrash(novel: NovelEntity) = withContext(Dispatchers.IO) {
         dao.updateNovel(novel.copy(deletedAt = null))
-        val allChapters = dao.getAllChaptersSnapshot().filter { it.novelId == novel.id && it.deletedAt != null }
-        allChapters.forEach { ch ->
-            dao.updateChapter(ch.copy(deletedAt = null))
-        }
+        dao.updateNovelChaptersDeletedAt(novel.id, null)
     }
 
-    suspend fun permanentlyDeleteNovel(novelId: Long) {
+    suspend fun permanentlyDeleteNovel(novelId: Long) = withContext(Dispatchers.IO) {
         val allChapters = dao.getAllChaptersSnapshot().filter { it.novelId == novelId }
         allChapters.forEach { dao.permanentlyDeleteChapter(it.id) }
         dao.permanentlyDeleteNovel(novelId)
@@ -98,9 +108,9 @@ class ReaderRepository(
         format: String = "TXT",
         translatorStage: String = "DRAFT",
         tags: String = ""
-    ): Long {
+    ): Long = withContext(Dispatchers.IO) {
         val wordCount = TextProcessingUtils.countWords(content)
-        return dao.insertChapter(
+        dao.insertChapter(
             ChapterEntity(
                 novelId = novelId,
                 title = title.trim().ifBlank { TextProcessingUtils.suggestTitleFromContent(content) },
@@ -113,26 +123,41 @@ class ReaderRepository(
         )
     }
 
-    suspend fun createChaptersBatch(novelId: Long?, previews: List<SplitChapterPreview>, format: String = "TXT"): List<Long> {
-        val now = System.currentTimeMillis()
-        val entities = previews.mapIndexed { index, item ->
-            ChapterEntity(
-                novelId = novelId,
-                title = item.title,
-                content = item.content,
-                format = format,
-                wordCount = item.wordCount,
-                createdAt = now + index,
-                modifiedAt = now + index
-            )
+    suspend fun createChaptersBatch(novelId: Long?, previews: List<SplitChapterPreview>, format: String = "TXT"): List<Long> =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val entities = previews.mapIndexed { index, item ->
+                ChapterEntity(
+                    novelId = novelId,
+                    title = item.title,
+                    content = item.content,
+                    format = format,
+                    wordCount = item.wordCount,
+                    createdAt = now + index,
+                    modifiedAt = now + index
+                )
+            }
+            dao.insertChapters(entities)
         }
-        return dao.insertChapters(entities)
-    }
 
-    suspend fun updateChapter(chapter: ChapterEntity) {
-        val updatedWords = TextProcessingUtils.countWords(chapter.content)
+    /**
+     * Safely updates a chapter. If the passed chapter came from the lightweight Library list
+     * (where content is empty to save RAM), it preserves the full content stored in SQLite.
+     */
+    suspend fun updateChapter(chapter: ChapterEntity) = withContext(Dispatchers.IO) {
+        val actualContent = if (chapter.content.isNotEmpty()) {
+            chapter.content
+        } else {
+            dao.getChapterById(chapter.id)?.content ?: ""
+        }
+        val updatedWords = if (chapter.content.isNotEmpty()) {
+            TextProcessingUtils.countWords(actualContent)
+        } else {
+            chapter.wordCount
+        }
         dao.updateChapter(
             chapter.copy(
+                content = actualContent,
                 wordCount = updatedWords,
                 modifiedAt = System.currentTimeMillis()
             )
@@ -144,7 +169,7 @@ class ReaderRepository(
         paragraphIndex: Int,
         charOffset: Int,
         totalParagraphs: Int
-    ) {
+    ) = withContext(Dispatchers.IO) {
         val safeTotal = totalParagraphs.coerceAtLeast(1)
         val rawPercent = if (safeTotal <= 1) {
             100f
@@ -166,12 +191,13 @@ class ReaderRepository(
         )
     }
 
-    suspend fun duplicateChapter(chapter: ChapterEntity): Long {
+    suspend fun duplicateChapter(chapter: ChapterEntity): Long = withContext(Dispatchers.IO) {
+        val full = dao.getChapterById(chapter.id) ?: chapter
         val now = System.currentTimeMillis()
-        return dao.insertChapter(
-            chapter.copy(
+        dao.insertChapter(
+            full.copy(
                 id = 0,
-                title = "${chapter.title} (نسخة)",
+                title = "${full.title} (نسخة)",
                 createdAt = now,
                 modifiedAt = now
             )
@@ -182,19 +208,20 @@ class ReaderRepository(
         chapter: ChapterEntity,
         targetFormat: String,
         saveAsNewCopy: Boolean
-    ): Long {
+    ): Long = withContext(Dispatchers.IO) {
+        val full = dao.getChapterById(chapter.id) ?: chapter
         val convertedContent = TextProcessingUtils.convertTextFormat(
-            title = chapter.title,
-            currentContent = chapter.content,
-            fromFormat = chapter.format,
+            title = full.title,
+            currentContent = full.content,
+            fromFormat = full.format,
             toFormat = targetFormat
         )
         val now = System.currentTimeMillis()
-        return if (saveAsNewCopy) {
+        if (saveAsNewCopy) {
             dao.insertChapter(
-                chapter.copy(
+                full.copy(
                     id = 0,
-                    title = "${chapter.title} ($targetFormat)",
+                    title = "${full.title} ($targetFormat)",
                     content = convertedContent,
                     format = targetFormat,
                     wordCount = TextProcessingUtils.countWords(convertedContent),
@@ -204,23 +231,24 @@ class ReaderRepository(
             )
         } else {
             dao.updateChapter(
-                chapter.copy(
+                full.copy(
                     content = convertedContent,
                     format = targetFormat,
                     wordCount = TextProcessingUtils.countWords(convertedContent),
                     modifiedAt = now
                 )
             )
-            chapter.id
+            full.id
         }
     }
 
     suspend fun batchRenameChapters(
         chapters: List<ChapterEntity>,
-        pattern: String, // e.g. "الفصل {رقم}"
+        pattern: String,
         startNumber: Int,
         zeroPadding: Int
-    ) {
+    ) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
         chapters.forEachIndexed { idx, ch ->
             val num = startNumber + idx
             val numStr = num.toString().padStart(zeroPadding.coerceAtLeast(1), '0')
@@ -229,7 +257,7 @@ class ReaderRepository(
             } else {
                 "$pattern $numStr"
             }
-            dao.updateChapter(ch.copy(title = newTitle.trim(), modifiedAt = System.currentTimeMillis()))
+            dao.updateChapterTitleAndTags(ch.id, newTitle.trim(), ch.tags, now)
         }
     }
 
@@ -238,47 +266,44 @@ class ReaderRepository(
         mergedTitle: String,
         targetNovelId: Long?,
         deleteOriginalsToTrash: Boolean
-    ): Long {
-        val combinedContent = chapters.joinToString("\n\n* * *\n\n") { ch ->
+    ): Long = withContext(Dispatchers.IO) {
+        val fullChapters = chapters.mapNotNull { dao.getChapterById(it.id) }
+        val combinedContent = fullChapters.joinToString("\n\n* * *\n\n") { ch ->
             "${ch.title}\n\n${ch.content.trim()}"
         }
         val newId = createChapter(
             novelId = targetNovelId,
-            title = mergedTitle.ifBlank { "فصل مدمج (${chapters.size} فصول)" },
+            title = mergedTitle.ifBlank { "فصل مدمج (${fullChapters.size} فصول)" },
             content = combinedContent,
-            format = chapters.firstOrNull()?.format ?: "TXT"
+            format = fullChapters.firstOrNull()?.format ?: "TXT"
         )
         if (deleteOriginalsToTrash) {
             val now = System.currentTimeMillis()
-            chapters.forEach { ch ->
-                dao.updateChapter(ch.copy(deletedAt = now))
+            fullChapters.forEach { ch ->
+                dao.updateChapterDeletedAt(ch.id, now)
             }
         }
-        return newId
+        newId
     }
 
-    suspend fun moveChaptersToTrash(chapterIds: List<Long>) {
+    suspend fun moveChaptersToTrash(chapterIds: List<Long>) = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         chapterIds.forEach { id ->
-            val ch = dao.getChapterById(id)
-            if (ch != null) {
-                dao.updateChapter(ch.copy(deletedAt = now))
-            }
+            dao.updateChapterDeletedAt(id, now)
         }
     }
 
-    suspend fun restoreChaptersFromTrash(chapterIds: List<Long>) {
+    suspend fun restoreChaptersFromTrash(chapterIds: List<Long>) = withContext(Dispatchers.IO) {
         chapterIds.forEach { id ->
-            val ch = dao.getChapterById(id)
-            if (ch != null) {
-                dao.updateChapter(ch.copy(deletedAt = null))
-            }
+            dao.updateChapterDeletedAt(id, null)
         }
     }
 
-    suspend fun permanentlyDeleteChapter(id: Long) = dao.permanentlyDeleteChapter(id)
+    suspend fun permanentlyDeleteChapter(id: Long) = withContext(Dispatchers.IO) {
+        dao.permanentlyDeleteChapter(id)
+    }
 
-    suspend fun emptyAllTrash() {
+    suspend fun emptyAllTrash() = withContext(Dispatchers.IO) {
         dao.emptyTrashChapters()
         dao.emptyTrashNovels()
     }
@@ -289,15 +314,16 @@ class ReaderRepository(
         findQuery: String,
         replaceWith: String,
         matchCase: Boolean
-    ): Int {
-        if (findQuery.isEmpty()) return 0
+    ): Int = withContext(Dispatchers.IO) {
+        if (findQuery.isEmpty()) return@withContext 0
         var totalReplacements = 0
         val regex = if (matchCase) {
             Regex(Regex.escape(findQuery))
         } else {
             Regex(Regex.escape(findQuery), RegexOption.IGNORE_CASE)
         }
-        targetChapters.forEach { ch ->
+        targetChapters.forEach { summary ->
+            val ch = dao.getChapterById(summary.id) ?: return@forEach
             val matchesCount = regex.findAll(ch.content).count()
             if (matchesCount > 0) {
                 totalReplacements += matchesCount
@@ -311,43 +337,54 @@ class ReaderRepository(
                 )
             }
         }
-        return totalReplacements
+        totalReplacements
     }
 
     // --- Annotations & Glossary ---
-    suspend fun addAnnotation(annotation: AnnotationEntity): Long = dao.insertAnnotation(annotation)
-    suspend fun deleteAnnotation(id: Long) = dao.deleteAnnotationById(id)
-
-    suspend fun saveGlossaryTerm(term: GlossaryEntity): Long = dao.insertGlossaryTerm(term)
-    suspend fun deleteGlossaryTerm(id: Long) = dao.deleteGlossaryTermById(id)
-
-    // --- Reading Stats Recording ---
-    suspend fun recordReadingProgress(minutesDelta: Int, wordsDelta: Int, completedChapterDelta: Int = 0) {
-        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-        val current = dao.getStatsForDate(today)
-        if (current == null) {
-            dao.upsertReadingStats(
-                ReadingStatsEntity(
-                    dateString = today,
-                    minutesRead = minutesDelta.coerceAtLeast(0),
-                    wordsRead = wordsDelta.coerceAtLeast(0),
-                    chaptersCompleted = completedChapterDelta.coerceAtLeast(0)
-                )
-            )
-        } else {
-            dao.upsertReadingStats(
-                current.copy(
-                    minutesRead = (current.minutesRead + minutesDelta).coerceAtLeast(0),
-                    wordsRead = (current.wordsRead + wordsDelta).coerceAtLeast(0),
-                    chaptersCompleted = (current.chaptersCompleted + completedChapterDelta).coerceAtLeast(0),
-                    updatedAt = System.currentTimeMillis()
-                )
-            )
-        }
+    suspend fun addAnnotation(annotation: AnnotationEntity): Long = withContext(Dispatchers.IO) {
+        dao.insertAnnotation(annotation)
     }
 
+    suspend fun deleteAnnotation(id: Long) = withContext(Dispatchers.IO) {
+        dao.deleteAnnotationById(id)
+    }
+
+    suspend fun saveGlossaryTerm(term: GlossaryEntity): Long = withContext(Dispatchers.IO) {
+        dao.insertGlossaryTerm(term)
+    }
+
+    suspend fun deleteGlossaryTerm(id: Long) = withContext(Dispatchers.IO) {
+        dao.deleteGlossaryTermById(id)
+    }
+
+    // --- Reading Stats Recording ---
+    suspend fun recordReadingProgress(minutesDelta: Int, wordsDelta: Int, completedChapterDelta: Int = 0) =
+        withContext(Dispatchers.IO) {
+            val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+            val current = dao.getStatsForDate(today)
+            if (current == null) {
+                dao.upsertReadingStats(
+                    ReadingStatsEntity(
+                        dateString = today,
+                        minutesRead = minutesDelta.coerceAtLeast(0),
+                        wordsRead = wordsDelta.coerceAtLeast(0),
+                        chaptersCompleted = completedChapterDelta.coerceAtLeast(0)
+                    )
+                )
+            } else {
+                dao.upsertReadingStats(
+                    current.copy(
+                        minutesRead = (current.minutesRead + minutesDelta).coerceAtLeast(0),
+                        wordsRead = (current.wordsRead + wordsDelta).coerceAtLeast(0),
+                        chaptersCompleted = (current.chaptersCompleted + completedChapterDelta).coerceAtLeast(0),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+
     // --- Backup & Restore (JSON) ---
-    suspend fun exportFullBackupJson(currentSettings: ReaderSettings): String {
+    suspend fun exportFullBackupJson(currentSettings: ReaderSettings): String = withContext(Dispatchers.IO) {
         val root = JSONObject()
         root.put("version", 1)
         root.put("exportedAt", System.currentTimeMillis())
@@ -422,11 +459,11 @@ class ReaderRepository(
         }
         root.put("annotations", annotationsArr)
 
-        return root.toString(2)
+        root.toString(2)
     }
 
-    suspend fun importFullBackupJson(jsonString: String): Boolean {
-        return try {
+    suspend fun importFullBackupJson(jsonString: String): Boolean = withContext(Dispatchers.IO) {
+        try {
             val root = JSONObject(jsonString)
             if (root.has("settings")) {
                 val settings = ReaderSettings.fromJsonString(root.getJSONObject("settings").toString())
