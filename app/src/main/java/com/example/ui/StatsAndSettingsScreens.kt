@@ -1011,9 +1011,11 @@ private fun GitHubApkGuideDialog(
               - name: Accept Android SDK Licenses
                 run: |
                   yes | ${'$'}{ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
-              - name: Generate debug.keystore
+              - name: Restore Persistent Signing Key (debug.keystore)
                 run: |
-                  if [ ! -f debug.keystore ]; then
+                  if [ -f debug.keystore.base64 ]; then
+                    base64 -di debug.keystore.base64 > debug.keystore
+                  elif [ ! -f debug.keystore ]; then
                     keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
                   fi
               - uses: gradle/actions/setup-gradle@v4
@@ -1022,16 +1024,17 @@ private fun GitHubApkGuideDialog(
               - name: Build Debug APK
                 run: |
                   gradle assembleDebug --no-daemon
-                  cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.0-debug.apk
+                  cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.1.apk
               - uses: actions/upload-artifact@v4
                 with:
-                  name: ChapterReader-APK
-                  path: app/build/outputs/apk/debug/ChapterReader-v1.0-debug.apk
+                  name: ChapterReader-v1.1-APK-Zip
+                  path: app/build/outputs/apk/debug/ChapterReader-v1.1.apk
               - uses: softprops/action-gh-release@v2
                 with:
-                  tag_name: latest-apk
-                  name: "قارئ الفصول - أحدث نسخة APK جاهزة للتثبيت"
-                  files: app/build/outputs/apk/debug/ChapterReader-v1.0-debug.apk
+                  tag_name: v1.1.${'$'}{{ github.run_number }}
+                  name: "قارئ الفصول v1.1 - أحدث نسخة APK جاهزة للتثبيت"
+                  files: app/build/outputs/apk/debug/ChapterReader-v1.1.apk
+                  make_latest: true
         """.trimIndent()
     }
 
@@ -1039,7 +1042,7 @@ private fun GitHubApkGuideDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "دليل بناء وتحميل APK من GitHub خطوة بخطوة",
+                text = "دليل بناء وتحميل APK وحل خطأ الحزمة",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -1053,23 +1056,18 @@ private fun GitHubApkGuideDialog(
             ) {
                 GuideStepItem(
                     stepNumber = "1",
-                    title = "رفع ملف البناء التلقائي (Push to GitHub)",
-                    description = "اضغط على أيقونة GitHub أعلى منصة AI Studio واعمل Push لرفع ملف (.github/workflows/build-apk.yml) المجهز في المشروع إلى مستودعك."
+                    title = "حمّل من Releases وليس من Artifacts",
+                    description = "ملف Artifacts في GitHub يكون مضغوطًا بصيغة (.zip) ويعطي «خطأ في تحليل الحزمة» إذا فتحته مباشرة. ادخل دائمًا إلى قسم Releases وحمّل ملف ChapterReader-v1.1.apk من تحت قسم Assets."
                 )
                 GuideStepItem(
                     stepNumber = "2",
-                    title = "تشغيل البناء من تبويب Actions",
-                    description = "افتح مستودعك في GitHub ⬅️ ادخل تبويب Actions ⬅️ اختر (Build & Release Android APK) ⬅️ اضغط زر Run workflow وانتظر دقيقتين حتى تظهر علامة الصح الخضراء ✅."
+                    title = "حل رسالة «الحزمة تتعارض مع حزمة حالية»",
+                    description = "إذا ثبّتَ النسخة الأولى من مصدر مختلف (أو قبل توحيد مفتاح التوقيع)، افتح تطبيقك الحالي ⬅️ الإعدادات ⬅️ (حفظ نسخة JSON) لحفظ كل فصولك ومواضع قراءتك في ملف واحد ⬅️ احذف التطبيق القديم وثبّت الجديد ثم اضغط (استعادة نسخة)."
                 )
                 GuideStepItem(
                     stepNumber = "3",
-                    title = "التحميل المباشر من قسم Releases (الأسهل للجوال)",
-                    description = "من الصفحة الرئيسية لمستودعك على GitHub، افتح قسم Releases وستجد إصدار (قارئ الفصول - أحدث نسخة APK) وبداخله ملف ChapterReader-v1.0-debug.apk جاهزًا للتحميل والتثبيت بضغطة واحدة بدون فك ضغط!"
-                )
-                GuideStepItem(
-                    stepNumber = "4",
-                    title = "أو التحميل من قسم Artifacts داخل Actions",
-                    description = "يمكنك أيضًا الدخول على عملية البناء المكتملة داخل تبويب Actions والنزول لأسفل الصفحة عند قسم Artifacts والضغط على ChapterReader-APK لتنزيله."
+                    title = "تحديثات المستقبل فورية بدون حذف",
+                    description = "بعد تثبيت نسخة v1.1 الموقعة بالمفتاح الموحد (debug.keystore.base64)، ستتثبت جميع التحديثات القادمة فوق التطبيق مباشرة دون الحاجة لحذفه أبدًا."
                 )
 
                 OutlinedButton(

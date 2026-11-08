@@ -29,7 +29,7 @@ jobs:
       - name: Restore Persistent Signing Key (debug.keystore)
         run: |
           if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+            base64 -di debug.keystore.base64 > debug.keystore
           elif [ ! -f debug.keystore ]; then
             keytool -genkey -v \
               -keystore debug.keystore \
@@ -50,26 +50,23 @@ jobs:
       - name: Build Debug APK
         run: |
           gradle assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.1-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/ChapterReader-v1.1.apk
 
-      - name: Upload APK to Actions Artifacts
+      - name: Upload APK to Actions Artifacts (ZIP)
         uses: actions/upload-artifact@v4
         with:
-          name: ChapterReader-APK
-          path: app/build/outputs/apk/debug/ChapterReader-v1.1-debug.apk
+          name: ChapterReader-v1.1-APK-Zip
+          path: app/build/outputs/apk/debug/ChapterReader-v1.1.apk
 
-      - name: Publish APK to GitHub Releases
+      - name: Publish Direct APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-apk
-          name: "قارئ الفصول v1.1 - تحديث سريع وسلس (بدون فقدان البيانات)"
+          tag_name: v1.1.${{ github.run_number }}
+          name: "قارئ الفصول v1.1 (بناء #${{ github.run_number }}) - ملف APK مباشر"
           body: |
-            ### تحميل تحديث تطبيق «قارئ الفصول» للأندرويد (v1.1) 📖⚡
-            - **تحديث آمن:** يمكنك تثبيت هذا التحديث فوق النسخة السابقة مباشرة دون حذف أي بيانات أو فصول مخزنة لديك.
-            - **أداء فائق وخفيف جدًا على الرام (RAM):** فتح فوري للتطبيق وتنقل فائق السلاسة 120fps.
-            - **قوائم إعدادات منظمة + إصلاح تداخل أزرار النظام في شاشة القراءة.**
-            
-            اضغط على ملف **`ChapterReader-v1.1-debug.apk`** بالأسفل تحت قسم **Assets** لتنزيله وتثبيته مباشرة.
-          files: app/build/outputs/apk/debug/ChapterReader-v1.1-debug.apk
+            ### تحميل تطبيق «قارئ الفصول» للأندرويد (v1.1) 📖⚡
+            - **هام لتجنب خطأ الحزمة:** حمّل ملف **`ChapterReader-v1.1.apk`** من قسم **Assets** بالأسفل مباشرة (وليس من Artifacts لأن Artifacts يكون مضغوطًا بصيغة ZIP).
+            - **إذا ظهرت رسالة «الحزمة تتعارض مع حزمة حالية» عند التحديث فوق النسخة الأولى:** فهذا لأن النسخة الأولى وُقّعت بمفتاح مختلف. افتح النسخة الحالية في هاتفك ⬅️ **الإعدادات** ⬅️ **حفظ نسخة JSON** ⬅️ احذف النسخة القديمة وثبّت النسخة الجديدة ثم اضغط **استعادة نسخة** (وستعود كل فصولك ومواضع قراءتك 100%). ومن بعد هذا الإصدار ستتثبت كل التحديثات القادمة مباشرة دون حذف.
+          files: app/build/outputs/apk/debug/ChapterReader-v1.1.apk
           prerelease: false
           make_latest: true
